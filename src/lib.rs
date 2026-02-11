@@ -9,7 +9,14 @@ pub mod nnue;
 pub mod types;
 pub mod uci;
 
+#[cfg(test)]
+mod tests;
+
+pub use accumulator::Accumulator;
 pub use evaluator::Evaluator;
+pub use feature_transformer::FeatureTransformer;
+pub use layers::Layer;
+pub use network::Network;
 pub use nnue::NNUEProbe;
 pub use types::{Color, Piece, Square};
 

@@ -26,7 +26,7 @@ const PS_B_ROOK: usize = 7 * SQUARE_NB;
 const PS_W_QUEEN: usize = 8 * SQUARE_NB;
 const PS_B_QUEEN: usize = 9 * SQUARE_NB;
 const PS_KING: usize = 10 * SQUARE_NB;
-const PS_NONE: usize = 0; 
+const PS_NONE: usize = 0;
 
 pub const PIECE_SQUARE_INDEX: [[usize; 16]; 2] = [
     // White Perspective

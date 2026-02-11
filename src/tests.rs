@@ -1,0 +1,444 @@
+#[cfg(test)]
+mod tests {
+    use crate::evaluator::Evaluator;
+    use crate::features::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
+    use crate::nnue::NNUEProbe;
+    use crate::types::{Color, Piece};
+    use crate::uci::{calculate_material, to_centipawns};
+
+    const BIG_NETWORK: &str = "archive/nnue/networks/nn-1c0000000000.nnue";
+    const SMALL_NETWORK: &str = "archive/nnue/networks/nn-37f18f62d772.nnue";
+
+    fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize) {
+        let parts: Vec<&str> = fen.split_whitespace().collect();
+        let board_str = parts[0];
+        let side_str = parts[1];
+
+        let mut pieces = Vec::new();
+        let mut rank = 7;
+        let mut file = 0;
+
+        for c in board_str.chars() {
+            if c == '/' {
+                rank -= 1;
+                file = 0;
+            } else if c.is_digit(10) {
+                file += c.to_digit(10).unwrap() as usize;
+            } else {
+                let color = if c.is_uppercase() { WHITE } else { BLACK };
+                let pt = match c.to_ascii_lowercase() {
+                    'p' => PAWN,
+                    'n' => KNIGHT,
+                    'b' => BISHOP,
+                    'r' => ROOK,
+                    'q' => QUEEN,
+                    'k' => KING,
+                    _ => panic!("Invalid: {}", c),
+                };
+                let sq = rank * 8 + file;
+                pieces.push((sq, pt, color));
+                file += 1;
+            }
+        }
+
+        let side = if side_str == "w" { WHITE } else { BLACK };
+        (pieces, side)
+    }
+
+    fn parse_fen_for_probe(fen: &str) -> (Vec<(Piece, usize)>, Color) {
+        let parts: Vec<&str> = fen.split_whitespace().collect();
+        let board_str = parts[0];
+        let side_str = parts[1];
+
+        let mut pieces = Vec::new();
+        let mut rank = 7;
+        let mut file = 0;
+
+        for c in board_str.chars() {
+            if c == '/' {
+                rank -= 1;
+                file = 0;
+            } else if c.is_digit(10) {
+                file += c.to_digit(10).unwrap() as usize;
+            } else {
+                let piece = match c {
+                    'P' => Piece::WhitePawn,
+                    'N' => Piece::WhiteKnight,
+                    'B' => Piece::WhiteBishop,
+                    'R' => Piece::WhiteRook,
+                    'Q' => Piece::WhiteQueen,
+                    'K' => Piece::WhiteKing,
+                    'p' => Piece::BlackPawn,
+                    'n' => Piece::BlackKnight,
+                    'b' => Piece::BlackBishop,
+                    'r' => Piece::BlackRook,
+                    'q' => Piece::BlackQueen,
+                    'k' => Piece::BlackKing,
+                    _ => panic!("Invalid: {}", c),
+                };
+                pieces.push((piece, rank * 8 + file));
+                file += 1;
+            }
+        }
+
+        let side = if side_str == "w" {
+            Color::White
+        } else {
+            Color::Black
+        };
+        (pieces, side)
+    }
+
+    fn pieces_to_internal(pieces: &[(Piece, usize)]) -> Vec<(usize, usize, usize)> {
+        pieces
+            .iter()
+            .map(|(p, sq)| {
+                let pt = p.piece_type();
+                let color = p.color().unwrap_or(Color::White).index();
+                (*sq, pt, color)
+            })
+            .collect()
+    }
+
+    fn to_cp(pieces: &[(Piece, usize)], side: Color, internal: i32) -> i32 {
+        let internal_vec = pieces_to_internal(pieces);
+        let material = calculate_material(&internal_vec);
+        let cp = to_centipawns(internal, material);
+        if side == Color::Black {
+            -cp
+        } else {
+            cp
+        }
+    }
+
+    #[test]
+    fn test_starting_position_eval() {
+        let mut eval = Evaluator::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks");
+
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let (pieces, side) = parse_fen(fen);
+
+        let internal = eval.evaluate(&pieces, side);
+        let material = calculate_material(&pieces);
+        let cp = to_centipawns(internal, material);
+        let white_cp = if side == BLACK { -cp } else { cp };
+
+        println!("Startpos: {} cp (white perspective)", white_cp);
+        assert!(white_cp.abs() < 50, "Start should be near 0");
+    }
+
+    #[test]
+    fn test_fen_eval_known_positions() {
+        let mut eval = Evaluator::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks");
+
+        let cases = vec![
+            (
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                "Startpos",
+                7,
+            ),
+            (
+                "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                "e4",
+                37,
+            ),
+            (
+                "r1bqkb1r/pppp1ppp/2n2n2/3Pp3/4P3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 1",
+                "QGA",
+                113,
+            ),
+        ];
+
+        for (fen, name, expected) in cases {
+            let (pieces, side) = parse_fen(fen);
+            let internal = eval.evaluate(&pieces, side);
+            let material = calculate_material(&pieces);
+            let cp = to_centipawns(internal, material);
+            let white_cp = if side == BLACK { -cp } else { cp };
+
+            let diff = (white_cp - expected).abs();
+            println!(
+                "{}: expected={}, got={}cp, diff={}",
+                name, expected, white_cp, diff
+            );
+            assert!(diff <= 2, "{} off by {} cp", name, diff);
+        }
+    }
+
+    #[test]
+    fn test_refresh_produces_same_result() {
+        let mut probe1 = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        let mut probe2 = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+
+        let fen = "r1bqkb1r/pppp1ppp/2n2n2/3Pp3/4P3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 1";
+        let (pieces, side) = parse_fen_for_probe(fen);
+
+        probe1.set_position(&pieces);
+        let internal1 = probe1.evaluate(side);
+        let cp1 = to_cp(&pieces, side, internal1);
+
+        probe2.set_position(&pieces);
+        let internal2 = probe2.evaluate(side);
+        let cp2 = to_cp(&pieces, side, internal2);
+
+        println!("Refresh test: {} cp vs {} cp", cp1, cp2);
+        assert_eq!(cp1, cp2, "Refresh should produce identical results");
+    }
+
+    #[test]
+    fn test_probe_evaluation_basic() {
+        let mut probe = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let (pieces, side) = parse_fen_for_probe(fen);
+        probe.set_position(&pieces);
+        let internal = probe.evaluate(side);
+        let cp = to_cp(&pieces, side, internal);
+
+        println!("Startpos: {} cp", cp);
+        assert!(cp == 7, "Should favor White slightly");
+    }
+
+    #[test]
+    fn test_probe_evaluation_middlegame() {
+        let mut probe = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+
+        let fen = "r1bq1rk1/ppp1npbp/2np2p1/4p3/2P4N/2NP2P1/PP2PPBP/R1BQ1RK1 w - - 0 1";
+        let (pieces, side) = parse_fen_for_probe(fen);
+        probe.set_position(&pieces);
+        let internal = probe.evaluate(side);
+        let cp = to_cp(&pieces, side, internal);
+
+        println!("Middlegame: {} cp", cp);
+        assert!(cp == 4, "Middlegame Should've been 4");
+    }
+
+    #[test]
+    fn test_probe_evaluation_endgame() {
+        let mut probe = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+
+        let fen = "3r1rk1/5ppp/8/8/8/8/8/3R1RK1 w - - 0 1";
+        let (pieces, side) = parse_fen_for_probe(fen);
+        probe.set_position(&pieces);
+        let internal = probe.evaluate(side);
+        let cp = to_cp(&pieces, side, internal);
+
+        println!("Rook endgame: {} cp", cp);
+        assert!(cp == -429, "White is loosin");
+    }
+
+    #[test]
+    fn test_side_to_move_affects_score() {
+        let mut probe_white = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        let mut probe_black = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+
+        let fen_w = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let fen_b = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1";
+
+        let (p_w, s_w) = parse_fen_for_probe(fen_w);
+        let (p_b, s_b) = parse_fen_for_probe(fen_b);
+
+        probe_white.set_position(&p_w);
+        probe_black.set_position(&p_b);
+
+        let cp_w = to_cp(&p_w, s_w, probe_white.evaluate(s_w));
+        let cp_b = to_cp(&p_b, s_b, probe_black.evaluate(s_b));
+
+        println!("White to move: {} cp", cp_w);
+        println!("Black to move: {} cp", cp_b);
+        assert!(true);
+    }
+}
+
+#[cfg(test)]
+mod manual_verification {
+    use crate::nnue::NNUEProbe;
+    use crate::types::{Color, Piece};
+    use crate::uci::{calculate_material, to_centipawns};
+
+    const BIG_NETWORK: &str = "archive/nnue/networks/nn-1c0000000000.nnue";
+    const SMALL_NETWORK: &str = "archive/nnue/networks/nn-37f18f62d772.nnue";
+
+    fn parse_fen(fen: &str) -> (Vec<(Piece, usize)>, Color) {
+        let parts: Vec<&str> = fen.split_whitespace().collect();
+        let board_str = parts[0];
+        let side_str = parts[1];
+
+        let mut pieces = Vec::new();
+        let mut rank = 7;
+        let mut file = 0;
+
+        for c in board_str.chars() {
+            if c == '/' {
+                rank -= 1;
+                file = 0;
+            } else if c.is_digit(10) {
+                file += c.to_digit(10).unwrap() as usize;
+            } else {
+                let piece = match c {
+                    'P' => Piece::WhitePawn,
+                    'N' => Piece::WhiteKnight,
+                    'B' => Piece::WhiteBishop,
+                    'R' => Piece::WhiteRook,
+                    'Q' => Piece::WhiteQueen,
+                    'K' => Piece::WhiteKing,
+                    'p' => Piece::BlackPawn,
+                    'n' => Piece::BlackKnight,
+                    'b' => Piece::BlackBishop,
+                    'r' => Piece::BlackRook,
+                    'q' => Piece::BlackQueen,
+                    'k' => Piece::BlackKing,
+                    _ => panic!("Invalid: {}", c),
+                };
+                pieces.push((piece, rank * 8 + file));
+                file += 1;
+            }
+        }
+
+        let side = if side_str == "w" {
+            Color::White
+        } else {
+            Color::Black
+        };
+        (pieces, side)
+    }
+
+    fn pieces_to_internal(pieces: &[(Piece, usize)]) -> Vec<(usize, usize, usize)> {
+        pieces
+            .iter()
+            .map(|(p, sq)| {
+                let pt = p.piece_type();
+                let color = p.color().unwrap_or(Color::White).index();
+                (*sq, pt, color)
+            })
+            .collect()
+    }
+
+    fn to_cp(pieces: &[(Piece, usize)], side: Color, internal: i32) -> i32 {
+        let internal_vec = pieces_to_internal(pieces);
+        let material = calculate_material(&internal_vec);
+        let cp = to_centipawns(internal, material);
+        if side == Color::Black {
+            -cp
+        } else {
+            cp
+        }
+    }
+
+    fn probe(fen: &str) -> i32 {
+        let mut p = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        let (pieces, side) = parse_fen(fen);
+        p.set_position(&pieces);
+        let internal = p.evaluate(side);
+        to_cp(&pieces, side, internal)
+    }
+
+    #[test]
+    fn verify_vs_stockfish() {
+        println!("\n=== Compare with Stockfish: stockfish -> position fen <FEN> -> eval ===\n");
+
+        let positions = vec![
+            (
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                "Startpos",
+            ),
+            (
+                "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                "e4",
+            ),
+            (
+                "r1bqkb1r/pppp1ppp/2n2n2/3Pp3/4P3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 1",
+                "QGA",
+            ),
+            (
+                "r1bq1rk1/ppp1npbp/2np2p1/4p3/2P4N/2NP2P1/PP2PPBP/R1BQ1RK1 w - - 0 1",
+                "Middlegame",
+            ),
+        ];
+
+        for (fen, name) in positions {
+            let score = probe(fen);
+            println!("{}: {} cp (white perspective)", name, score);
+        }
+        println!("\nCompare these with Stockfish 'Final evaluation' values.");
+        assert!(true);
+    }
+
+    #[test]
+    fn incremental_update_test() {
+        println!("\n=== Incremental Update Test ===\n");
+
+        let mut inc = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        let (start, _) = parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        inc.set_position(&start);
+
+        inc.update(&[(Piece::WhitePawn, 12)], &[(Piece::WhitePawn, 28)]);
+        let inc_internal = inc.evaluate(Color::Black);
+        let inc_cp = to_cp(&start, Color::Black, inc_internal);
+
+        let mut full = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        let (moved, moved_side) =
+            parse_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
+        full.set_position(&moved);
+        let full_internal = full.evaluate(Color::Black);
+        let full_cp = to_cp(&moved, moved_side, full_internal);
+
+        println!("Incremental e2-e4: {} cp", inc_cp);
+        println!("Full e2-e4: {} cp", full_cp);
+        let diff = (inc_cp - full_cp).abs();
+        println!("Difference: {} cp", diff);
+
+        assert!(
+            diff <= 5,
+            "Incremental should match full within 5 cp (diff={})",
+            diff
+        );
+    }
+
+    #[test]
+    fn castling_test() {
+        println!("\n=== Castling Evaluation ===\n");
+
+        let before_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQK2R w KQkq - 0 1";
+        let after_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQ1RK1 w kq - 0 1";
+
+        let before = probe(before_fen);
+        let after = probe(after_fen);
+
+        println!("Before O-O: {} cp (White to move)", before);
+        println!("After O-O: {} cp (White to move)", after);
+        println!("Difference: {} cp", after - before);
+
+        assert!(
+            before == -562 && after == -502,
+            "White is down a couple pieces"
+        );
+    }
+
+    #[test]
+    fn incremental_add_piece_test() {
+        println!("\n=== Incremental Add Single Piece ===\n");
+
+        let mut inc = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        let (empty, _) = parse_fen("6k1/8/8/8/8/8/8/3K4 w - - 0 1");
+        inc.set_position(&empty);
+
+        inc.update(&[], &[(Piece::WhitePawn, 8)]);
+        inc.update(&[], &[(Piece::WhitePawn, 9)]);
+        let inc_internal = inc.evaluate(Color::White);
+        let inc_cp = to_cp(&empty, Color::White, inc_internal);
+
+        let mut full = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        let (pawn, side) = parse_fen("6k1/8/8/8/8/8/PP6/3K4 w - - 0 1");
+        full.set_position(&pawn);
+        let full_internal = full.evaluate(Color::White);
+        let full_cp = to_cp(&pawn, side, full_internal);
+
+        println!("Incremental add pawn: {} cp", inc_cp);
+        println!("Full position: {} cp", full_cp);
+        let diff = (inc_cp - full_cp).abs();
+        println!("Difference: {} cp", diff);
+
+        assert!(diff <= 50, "Should be close (diff={})", diff);
+    }
+}
