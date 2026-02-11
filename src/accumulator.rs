@@ -1,6 +1,9 @@
 use crate::feature_transformer::FeatureTransformer;
 use crate::features::{self, make_index};
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 #[derive(Clone)]
 pub struct Accumulator {
     pub accumulation: [Vec<i16>; 2],
@@ -83,8 +86,34 @@ impl Accumulator {
         let offset = feature_idx * half_dims;
         let w_slice = &ft.weights[offset..offset + half_dims];
 
-        for (i, &w) in w_slice.iter().enumerate() {
-            self.accumulation[perspective][i] -= w;
+        // Vectorized update
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let mut i = 0;
+                let acc_ptr = self.accumulation[perspective].as_mut_ptr();
+                let w_ptr = w_slice.as_ptr();
+                let count = half_dims;
+
+                // Process 16 elements at a time
+                for _ in 0..(count / 16) {
+                    let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
+                    let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+                    let res = _mm256_sub_epi16(a, w);
+                    _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
+                    i += 16;
+                }
+
+                // Handle remainder
+                for j in i..count {
+                    *acc_ptr.add(j) -= *w_ptr.add(j) as i16;
+                }
+            }
+        } else {
+            // Scalar fallback
+            for (i, &w) in w_slice.iter().enumerate() {
+                self.accumulation[perspective][i] -= w;
+            }
         }
 
         let psqt_offset = feature_idx * crate::feature_transformer::PSQT_BUCKETS;
@@ -102,12 +131,38 @@ impl Accumulator {
         let offset = feature_idx * half_dims;
         let w_slice = &ft.weights[offset..offset + half_dims];
 
-        for (i, &w) in w_slice.iter().enumerate() {
-            self.accumulation[perspective][i] += w;
+        // Vectorized update
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let mut i = 0;
+                let acc_ptr = self.accumulation[perspective].as_mut_ptr();
+                let w_ptr = w_slice.as_ptr();
+                let count = half_dims;
+
+                // Process 16 elements at a time
+                for _ in 0..(count / 16) {
+                    let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
+                    let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+                    let res = _mm256_add_epi16(a, w);
+                    _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
+                    i += 16;
+                }
+
+                // Handle remainder
+                for j in i..count {
+                    *acc_ptr.add(j) += *w_ptr.add(j) as i16;
+                }
+            }
+        } else {
+            // Scalar fallback
+            for (i, &w) in w_slice.iter().enumerate() {
+                self.accumulation[perspective][i] += w;
+            }
         }
 
         // PSQT update
-        // psqt_weights: [Input][Buckets] 
+        // psqt_weights: [Input][Buckets]
         // psqtWeights size `InputDimensions * PSQTBuckets`.
         let psqt_offset = feature_idx * crate::feature_transformer::PSQT_BUCKETS;
         let psqt_slice =
