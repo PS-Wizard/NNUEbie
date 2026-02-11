@@ -5,9 +5,13 @@ pub mod features;
 pub mod layers;
 pub mod loader;
 pub mod network;
+pub mod nnue;
+pub mod types;
 pub mod uci;
 
 pub use evaluator::Evaluator;
+pub use nnue::NNUEProbe;
+pub use types::{Color, Piece, Square};
 
 pub use features::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
 
