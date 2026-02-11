@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "nnue-rs"
+name = "nnuebie"
 version = "0.1.0"

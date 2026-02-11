@@ -1,4 +1,4 @@
-use nnue_rs::{Color, NNUEProbe, Piece};
+use nnuebie::{Color, NNUEProbe, Piece};
 use std::time::Instant;
 
 fn main() {

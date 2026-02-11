@@ -1,5 +1,5 @@
 [package]
-name = "nnue-rs"
+name = "nnuebie"
 version = "0.1.0"
 edition = "2021"
 

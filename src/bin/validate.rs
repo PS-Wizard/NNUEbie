@@ -1,5 +1,5 @@
-use nnue_rs::uci::{calculate_material, to_centipawns};
-use nnue_rs::{Evaluator, BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
+use nnuebie::uci::{calculate_material, to_centipawns};
+use nnuebie::{Evaluator, BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
 
 fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize) {
     let parts: Vec<&str> = fen.split_whitespace().collect();
