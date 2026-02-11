@@ -1,6 +1,7 @@
 use crate::evaluator::{
     Evaluator, BISHOP_VALUE, KNIGHT_VALUE, PAWN_VALUE, QUEEN_VALUE, ROOK_VALUE,
 };
+use crate::network::ScratchBuffer;
 use crate::types::{Color, Piece, Square};
 use std::io;
 
@@ -11,6 +12,8 @@ pub struct NNUEProbe {
     piece_count: usize,
     pawn_count: [i32; 2],
     non_pawn_material: [i32; 2],
+    scratch_big: Option<ScratchBuffer>,
+    scratch_small: Option<ScratchBuffer>,
 }
 
 impl NNUEProbe {
@@ -23,6 +26,8 @@ impl NNUEProbe {
             piece_count: 0,
             pawn_count: [0; 2],
             non_pawn_material: [0; 2],
+            scratch_big: None,
+            scratch_small: None,
         })
     }
 
@@ -171,7 +176,7 @@ impl NNUEProbe {
             .refresh(&pieces_idx, self.king_squares, ft_small);
     }
 
-    pub fn evaluate(&self, side_to_move: Color) -> i32 {
+    pub fn evaluate(&mut self, side_to_move: Color) -> i32 {
         let stm = side_to_move.index();
         let simple_eval = PAWN_VALUE * (self.pawn_count[stm] - self.pawn_count[1 - stm])
             + (self.non_pawn_material[stm] - self.non_pawn_material[1 - stm]);
@@ -190,29 +195,46 @@ impl NNUEProbe {
         let mut positional_val;
 
         if use_small {
+            if self.scratch_small.is_none() {
+                let half_dims = self.evaluator.small_net.feature_transformer.half_dims;
+                self.scratch_small = Some(ScratchBuffer::new(half_dims));
+            }
+            let scratch = self.scratch_small.as_mut().unwrap();
             let (psqt, pos) =
                 self.evaluator
                     .small_net
-                    .evaluate(&self.evaluator.acc_small, bucket, stm);
+                    .evaluate(&self.evaluator.acc_small, bucket, stm, scratch);
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
             positional_val = pos;
 
             if nnue_val.abs() < 236 {
                 // Use big
-                let (psqt_b, pos_b) =
-                    self.evaluator
-                        .big_net
-                        .evaluate(&self.evaluator.acc_big, bucket, stm);
+                if self.scratch_big.is_none() {
+                    let half_dims = self.evaluator.big_net.feature_transformer.half_dims;
+                    self.scratch_big = Some(ScratchBuffer::new(half_dims));
+                }
+                let scratch_big = self.scratch_big.as_mut().unwrap();
+                let (psqt_b, pos_b) = self.evaluator.big_net.evaluate(
+                    &self.evaluator.acc_big,
+                    bucket,
+                    stm,
+                    scratch_big,
+                );
                 nnue_val = (125 * psqt_b + 131 * pos_b) / 128;
                 psqt_val = psqt_b;
                 positional_val = pos_b;
             }
         } else {
-            let (psqt, pos) = self
-                .evaluator
-                .big_net
-                .evaluate(&self.evaluator.acc_big, bucket, stm);
+            if self.scratch_big.is_none() {
+                let half_dims = self.evaluator.big_net.feature_transformer.half_dims;
+                self.scratch_big = Some(ScratchBuffer::new(half_dims));
+            }
+            let scratch = self.scratch_big.as_mut().unwrap();
+            let (psqt, pos) =
+                self.evaluator
+                    .big_net
+                    .evaluate(&self.evaluator.acc_big, bucket, stm, scratch);
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
             positional_val = pos;

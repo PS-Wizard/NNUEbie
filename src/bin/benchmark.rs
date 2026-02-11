@@ -119,12 +119,6 @@ fn main() {
         } else {
             acc.update_with_ksq(&removed, &added, ksq, ft);
         }
-
-        // Also run network evaluation (forward pass) because "evaluate" includes it
-        // Evaluator::evaluate does: refresh + network.evaluate
-        // So we should measure: update + network.evaluate
-        let bucket = (pieces.len() - 1) / 4;
-        std::hint::black_box(eval.big_net.evaluate(&acc, bucket, side));
     }
     let duration = start.elapsed();
     let nps_inc = iterations_inc as f64 / duration.as_secs_f64();

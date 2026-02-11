@@ -1,6 +1,6 @@
 use crate::accumulator::Accumulator;
 use crate::features::{BISHOP, KING, KNIGHT, PAWN, QUEEN, ROOK};
-use crate::network::Network;
+use crate::network::{Network, ScratchBuffer};
 use std::io;
 
 // Piece Values
@@ -15,6 +15,8 @@ pub struct Evaluator {
     pub small_net: Network,
     pub acc_big: Accumulator,
     pub acc_small: Accumulator,
+    scratch_big: Option<ScratchBuffer>,
+    scratch_small: Option<ScratchBuffer>,
 }
 
 impl Evaluator {
@@ -30,6 +32,8 @@ impl Evaluator {
             small_net,
             acc_big,
             acc_small,
+            scratch_big: None,
+            scratch_small: None,
         })
     }
 
@@ -90,9 +94,16 @@ impl Evaluator {
         if use_small {
             self.acc_small
                 .refresh(&simple_pieces, ksq, &self.small_net.feature_transformer);
-            let (psqt, pos) = self
-                .small_net
-                .evaluate(&self.acc_small, bucket, side_to_move);
+
+            if self.scratch_small.is_none() {
+                let half_dims = self.small_net.feature_transformer.half_dims;
+                self.scratch_small = Some(ScratchBuffer::new(half_dims));
+            }
+            let scratch = self.scratch_small.as_mut().unwrap();
+
+            let (psqt, pos) =
+                self.small_net
+                    .evaluate(&self.acc_small, bucket, side_to_move, scratch);
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
             positional_val = pos;
@@ -102,7 +113,16 @@ impl Evaluator {
                 // Re-evaluate with Big
                 self.acc_big
                     .refresh(&simple_pieces, ksq, &self.big_net.feature_transformer);
-                let (psqt_b, pos_b) = self.big_net.evaluate(&self.acc_big, bucket, side_to_move);
+
+                if self.scratch_big.is_none() {
+                    let half_dims = self.big_net.feature_transformer.half_dims;
+                    self.scratch_big = Some(ScratchBuffer::new(half_dims));
+                }
+                let scratch_big = self.scratch_big.as_mut().unwrap();
+
+                let (psqt_b, pos_b) =
+                    self.big_net
+                        .evaluate(&self.acc_big, bucket, side_to_move, scratch_big);
                 nnue_val = (125 * psqt_b + 131 * pos_b) / 128;
             } else {
                 // Keep Small Net values
@@ -110,7 +130,16 @@ impl Evaluator {
         } else {
             self.acc_big
                 .refresh(&simple_pieces, ksq, &self.big_net.feature_transformer);
-            let (psqt, pos) = self.big_net.evaluate(&self.acc_big, bucket, side_to_move);
+
+            if self.scratch_big.is_none() {
+                let half_dims = self.big_net.feature_transformer.half_dims;
+                self.scratch_big = Some(ScratchBuffer::new(half_dims));
+            }
+            let scratch = self.scratch_big.as_mut().unwrap();
+
+            let (psqt, pos) = self
+                .big_net
+                .evaluate(&self.acc_big, bucket, side_to_move, scratch);
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
             positional_val = pos;

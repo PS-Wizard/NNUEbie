@@ -18,6 +18,30 @@ pub struct Network {
     pub is_big: bool,
 }
 
+pub struct ScratchBuffer {
+    pub transformed_features: Vec<u8>,
+    pub fc_0_out: Vec<i32>,
+    pub ac_0_out: Vec<u8>, // Reused for ac_sqr_0 as well
+    pub fc_1_in: Vec<u8>,
+    pub fc_1_out: Vec<i32>,
+    pub ac_1_out: Vec<u8>,
+    pub fc_2_out: Vec<i32>,
+}
+
+impl ScratchBuffer {
+    pub fn new(half_dims: usize) -> Self {
+        Self {
+            transformed_features: vec![0u8; half_dims],
+            fc_0_out: vec![0i32; 16], // L2 + 1
+            ac_0_out: vec![0u8; 16],  // L2 + 1
+            fc_1_in: vec![0u8; 30],   // L2 * 2
+            fc_1_out: vec![0i32; 32], // L3
+            ac_1_out: vec![0u8; 32],  // L3
+            fc_2_out: vec![0i32; 1],  // 1
+        }
+    }
+}
+
 impl Network {
     pub fn load(path: &str, is_big: bool) -> io::Result<Self> {
         let f = File::open(path)?;
@@ -133,6 +157,7 @@ impl Network {
         accumulator: &Accumulator,
         bucket: usize,
         side_to_move: usize,
+        scratch: &mut ScratchBuffer,
     ) -> (i32, i32) {
         // 1. Transform Feature (Acc -> Output)
         // FeatureTransformer transform logic in C++:
@@ -153,7 +178,6 @@ impl Network {
 
         // Transformed features
         let half_dims = self.feature_transformer.half_dims;
-        let mut transformed_features = vec![0u8; half_dims]; // Output buffer
 
         // Output filled: first half Us, second half Them.
         for p in 0..2 {
@@ -165,7 +189,7 @@ impl Network {
                 let sum1 = accumulator.accumulation[perspective][j + half_dims / 2]
                     .clamp(0, 127 * 2) as i32;
 
-                transformed_features[offset + j] = ((sum0 * sum1) / 512) as u8;
+                scratch.transformed_features[offset + j] = ((sum0 * sum1) / 512) as u8;
             }
         }
 
@@ -177,38 +201,48 @@ impl Network {
         let fc_1 = &self.fc_1[bucket];
         let fc_2 = &self.fc_2[bucket];
 
-        let mut fc_0_out = vec![0i32; fc_0.output_dims]; // 16
-        fc_0.propagate(&transformed_features, &mut fc_0_out);
+        fc_0.propagate(&scratch.transformed_features, &mut scratch.fc_0_out);
 
-        let mut ac_sqr_0_out = vec![0u8; fc_0.output_dims]; // 16
-        self.ac_sqr_0.propagate(&fc_0_out, &mut ac_sqr_0_out);
-
-        let mut ac_0_out = vec![0u8; fc_0.output_dims]; // 16
-        self.ac_0.propagate(&fc_0_out, &mut ac_0_out);
+        self.ac_sqr_0
+            .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
+        self.ac_0
+            .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
 
         // Concatenate for fc_1 input: [ac_sqr_0(0..15), ac_0(0..15)]
         // Overlap: ac_0[0] overwrites ac_sqr_0[15].
         // fc_1 input size 30: reads [0..29] effectively skipping the residual indices.
-        let mut fc_1_in = vec![0u8; 30];
-        // Copy first 15 from ac_sqr_0
-        fc_1_in[0..15].copy_from_slice(&ac_sqr_0_out[0..15]);
-        // Copy first 15 from ac_0
-        fc_1_in[15..30].copy_from_slice(&ac_0_out[0..15]);
+        // Copy first 15 from ac_sqr_0 (reuse ac_0_out buffer for first 15, but ac_0_out IS ac_0_out. Wait.)
+        // ac_0_out now contains ac_0 output.
+        // We need ac_sqr_0 output AND ac_0 output.
+        // My scratch buffer only has one `ac_0_out`.
+        // So I need to run ac_sqr_0 first, copy it, then run ac_0.
 
-        let mut fc_1_out = vec![0i32; fc_1.output_dims]; // 32
-        fc_1.propagate(&fc_1_in, &mut fc_1_out);
+        // Strategy:
+        // 1. Run ac_sqr_0 -> scratch.ac_0_out
+        // 2. Copy scratch.ac_0_out[0..15] to scratch.fc_1_in[0..15]
+        // 3. Run ac_0 -> scratch.ac_0_out (overwrites)
+        // 4. Copy scratch.ac_0_out[0..15] to scratch.fc_1_in[15..30]
 
-        let mut ac_1_out = vec![0u8; fc_1.output_dims]; // 32
-        self.ac_1.propagate(&fc_1_out, &mut ac_1_out);
+        self.ac_sqr_0
+            .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
+        scratch.fc_1_in[0..15].copy_from_slice(&scratch.ac_0_out[0..15]);
 
-        let mut fc_2_out = vec![0i32; fc_2.output_dims]; // 1
-        fc_2.propagate(&ac_1_out, &mut fc_2_out);
+        self.ac_0
+            .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
+        scratch.fc_1_in[15..30].copy_from_slice(&scratch.ac_0_out[0..15]);
+
+        fc_1.propagate(&scratch.fc_1_in, &mut scratch.fc_1_out);
+
+        self.ac_1
+            .propagate(&scratch.fc_1_out, &mut scratch.ac_1_out);
+
+        fc_2.propagate(&scratch.ac_1_out, &mut scratch.fc_2_out);
 
         // Residual scaling
-        let residual = fc_0_out[15];
+        let residual = scratch.fc_0_out[15];
         let fwd_out = residual * (600 * OUTPUT_SCALE) / (127 * (1 << WEIGHT_SCALE_BITS));
 
-        let positional = fc_2_out[0] + fwd_out;
+        let positional = scratch.fc_2_out[0] + fwd_out;
 
         // Result scaled by OutputScale
         (psqt / OUTPUT_SCALE, positional / OUTPUT_SCALE)
