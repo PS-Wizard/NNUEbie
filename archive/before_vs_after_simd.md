@@ -1,4 +1,4 @@
-# Before
+# Before SIMD Accumulator
 
 [wizard@archbtw ~/Projects/nnue-rs/target/release] -> time ./benchmark
 Loading networks...
@@ -12,14 +12,13 @@ Speedup: 7.10x
 [wizard@archbtw ~/Projects/nnue-rs/target/release] ->
 
 
-# After:
+# After SIMD Accumulator
 [wizard@archbtw ~/Projects/nnue-rs/target/release] -> time ./benchmark
 Loading networks...
 Benchmarking 1000000 evaluations...
-Full Refresh Throughput: 116830.91 evaluations/sec
-
+Full Refresh Throughput: 110601.51 evaluations/sec
 Benchmarking Incremental Update...
-Incremental Update Throughput: 3643729.68 evaluations/sec
-Speedup: 31.19x
-./benchmark  8.92s user 0.03s system 99% cpu 8.981 total
+Incremental Update Throughput: 245491.64 evaluations/sec
+Speedup: 2.22x
+./benchmark  13.19s user 0.03s system 99% cpu 13.261 total
 [wizard@archbtw ~/Projects/nnue-rs/target/release] ->
