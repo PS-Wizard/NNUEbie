@@ -5,6 +5,9 @@ use crate::{OUTPUT_SCALE, WEIGHT_SCALE_BITS};
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 pub const LAYER_STACKS: usize = 8;
 
 pub struct Network {
@@ -152,6 +155,87 @@ impl Network {
         })
     }
 
+    fn transform_features(
+        &self,
+        accumulator: &Accumulator,
+        scratch: &mut ScratchBuffer,
+        us: usize,
+        them: usize,
+    ) {
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                return self.transform_features_avx2(accumulator, scratch, us, them);
+            }
+        }
+
+        let half_dims = self.feature_transformer.half_dims;
+
+        // Output filled: first half Us, second half Them.
+        for p in 0..2 {
+            let perspective = if p == 0 { us } else { them };
+            let offset = (half_dims / 2) * p;
+
+            for j in 0..(half_dims / 2) {
+                let sum0 = accumulator.accumulation[perspective][j].clamp(0, 127 * 2) as i32;
+                let sum1 = accumulator.accumulation[perspective][j + half_dims / 2]
+                    .clamp(0, 127 * 2) as i32;
+
+                scratch.transformed_features[offset + j] = ((sum0 * sum1) / 512) as u8;
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn transform_features_avx2(
+        &self,
+        accumulator: &Accumulator,
+        scratch: &mut ScratchBuffer,
+        us: usize,
+        them: usize,
+    ) {
+        let half_dims = self.feature_transformer.half_dims;
+        let output_ptr = scratch.transformed_features.as_mut_ptr();
+
+        for p in 0..2 {
+            let perspective = if p == 0 { us } else { them };
+            let offset = (half_dims / 2) * p;
+            let acc_ptr = accumulator.accumulation[perspective].as_ptr();
+
+            let chunk_size = 16;
+            let n = (half_dims / 2) / chunk_size * chunk_size;
+
+            for j in (0..n).step_by(chunk_size) {
+                let v0 = _mm256_loadu_si256(acc_ptr.add(j) as *const _);
+                let v1 = _mm256_loadu_si256(acc_ptr.add(j + half_dims / 2) as *const _);
+
+                let min = _mm256_set1_epi16(254);
+                let max = _mm256_setzero_si256();
+
+                let v0_c = _mm256_max_epi16(max, _mm256_min_epi16(min, v0));
+                let v1_c = _mm256_max_epi16(max, _mm256_min_epi16(min, v1));
+
+                let prod = _mm256_mullo_epi16(v0_c, v1_c);
+                let res = _mm256_srli_epi16(prod, 9);
+
+                let lo = _mm256_castsi256_si128(res);
+                let hi = _mm256_extracti128_si256(res, 1);
+
+                let packed = _mm_packus_epi16(lo, hi);
+
+                _mm_storeu_si128(output_ptr.add(offset + j) as *mut _, packed);
+            }
+
+            for j in n..(half_dims / 2) {
+                let sum0 = accumulator.accumulation[perspective][j].clamp(0, 127 * 2) as i32;
+                let sum1 = accumulator.accumulation[perspective][j + half_dims / 2]
+                    .clamp(0, 127 * 2) as i32;
+                *output_ptr.add(offset + j) = ((sum0 * sum1) / 512) as u8;
+            }
+        }
+    }
+
     pub fn evaluate(
         &self,
         accumulator: &Accumulator,
@@ -176,22 +260,7 @@ impl Network {
             - accumulator.psqt_accumulation[them][bucket])
             / 2;
 
-        // Transformed features
-        let half_dims = self.feature_transformer.half_dims;
-
-        // Output filled: first half Us, second half Them.
-        for p in 0..2 {
-            let perspective = if p == 0 { us } else { them };
-            let offset = (half_dims / 2) * p;
-
-            for j in 0..(half_dims / 2) {
-                let sum0 = accumulator.accumulation[perspective][j].clamp(0, 127 * 2) as i32;
-                let sum1 = accumulator.accumulation[perspective][j + half_dims / 2]
-                    .clamp(0, 127 * 2) as i32;
-
-                scratch.transformed_features[offset + j] = ((sum0 * sum1) / 512) as u8;
-            }
-        }
+        self.transform_features(accumulator, scratch, us, them);
 
         // 2. Propagate MLP
         let _l2 = 15;
