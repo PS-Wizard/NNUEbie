@@ -8,3 +8,9 @@ edition = "2021"
 [[bin]]
 name = "validate"
 path = "src/bin/validate.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

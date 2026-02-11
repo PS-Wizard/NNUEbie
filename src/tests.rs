@@ -161,7 +161,7 @@ mod tests {
                 "{}: expected={}, got={}cp, diff={}",
                 name, expected, white_cp, diff
             );
-            assert!(diff <= 2, "{} off by {} cp", name, diff);
+            assert!(diff == 0, "{} off by {} cp", name, diff);
         }
     }
 
@@ -389,7 +389,7 @@ mod manual_verification {
         println!("Difference: {} cp", diff);
 
         assert!(
-            diff <= 5,
+            diff == 0,
             "Incremental should match full within 5 cp (diff={})",
             diff
         );
@@ -439,6 +439,6 @@ mod manual_verification {
         let diff = (inc_cp - full_cp).abs();
         println!("Difference: {} cp", diff);
 
-        assert!(diff <= 50, "Should be close (diff={})", diff);
+        assert!(diff == 0, "Should be close (diff={})", diff);
     }
 }
