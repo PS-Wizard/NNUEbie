@@ -1,5 +1,6 @@
 use nnuebie::uci::{calculate_material, to_centipawns};
-use nnuebie::{Evaluator, BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
+use nnuebie::{Evaluator, NnueNetworks, BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
+use std::sync::Arc;
 
 fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize) {
     let parts: Vec<&str> = fen.split_whitespace().collect();
@@ -38,11 +39,13 @@ fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize) {
 }
 
 fn main() {
-    let big_path = "../../archive/nnue/networks/nn-1c0000000000.nnue";
-    let small_path = "../../archive/nnue/networks/nn-37f18f62d772.nnue";
+    let big_path = "archive/nnue/networks/nn-1c0000000000.nnue";
+    let small_path = "archive/nnue/networks/nn-37f18f62d772.nnue";
 
     println!("Loading networks...");
-    let mut eval = Evaluator::new(big_path, small_path).expect("Failed to load networks");
+    let networks =
+        Arc::new(NnueNetworks::new(big_path, small_path).expect("Failed to load networks"));
+    let mut eval = Evaluator::new(networks);
 
     // Expected values from Stockfish "eval" command output (Final evaluation, White side)
     // Tolerance is ±2 cp

@@ -1,9 +1,10 @@
 use crate::evaluator::{
-    Evaluator, BISHOP_VALUE, KNIGHT_VALUE, PAWN_VALUE, QUEEN_VALUE, ROOK_VALUE,
+    Evaluator, NnueNetworks, BISHOP_VALUE, KNIGHT_VALUE, PAWN_VALUE, QUEEN_VALUE, ROOK_VALUE,
 };
 use crate::network::ScratchBuffer;
 use crate::types::{Color, Piece, Square};
 use std::io;
+use std::sync::Arc;
 
 pub struct NNUEProbe {
     evaluator: Evaluator,
@@ -18,7 +19,12 @@ pub struct NNUEProbe {
 
 impl NNUEProbe {
     pub fn new(big_path: &str, small_path: &str) -> io::Result<Self> {
-        let evaluator = Evaluator::new(big_path, small_path)?;
+        let networks = Arc::new(NnueNetworks::new(big_path, small_path)?);
+        Self::with_networks(networks)
+    }
+
+    pub fn with_networks(networks: Arc<NnueNetworks>) -> io::Result<Self> {
+        let evaluator = Evaluator::new(networks);
         Ok(Self {
             evaluator,
             pieces: [Piece::None; 64],
@@ -137,7 +143,7 @@ impl NNUEProbe {
             let added_mapped: Vec<(usize, usize)> =
                 added.iter().map(|&(p, s)| (s, p.index())).collect();
 
-            let ft_big = &self.evaluator.big_net.feature_transformer;
+            let ft_big = &self.evaluator.networks.big_net.feature_transformer;
             self.evaluator.acc_big.update_with_ksq(
                 &added_mapped,
                 &removed_mapped,
@@ -145,7 +151,7 @@ impl NNUEProbe {
                 ft_big,
             );
 
-            let ft_small = &self.evaluator.small_net.feature_transformer;
+            let ft_small = &self.evaluator.networks.small_net.feature_transformer;
             self.evaluator.acc_small.update_with_ksq(
                 &added_mapped,
                 &removed_mapped,
@@ -165,12 +171,12 @@ impl NNUEProbe {
             }
         }
 
-        let ft_big = &self.evaluator.big_net.feature_transformer;
+        let ft_big = &self.evaluator.networks.big_net.feature_transformer;
         self.evaluator
             .acc_big
             .refresh(&pieces_idx, self.king_squares, ft_big);
 
-        let ft_small = &self.evaluator.small_net.feature_transformer;
+        let ft_small = &self.evaluator.networks.small_net.feature_transformer;
         self.evaluator
             .acc_small
             .refresh(&pieces_idx, self.king_squares, ft_small);
@@ -196,14 +202,21 @@ impl NNUEProbe {
 
         if use_small {
             if self.scratch_small.is_none() {
-                let half_dims = self.evaluator.small_net.feature_transformer.half_dims;
+                let half_dims = self
+                    .evaluator
+                    .networks
+                    .small_net
+                    .feature_transformer
+                    .half_dims;
                 self.scratch_small = Some(ScratchBuffer::new(half_dims));
             }
             let scratch = self.scratch_small.as_mut().unwrap();
-            let (psqt, pos) =
-                self.evaluator
-                    .small_net
-                    .evaluate(&self.evaluator.acc_small, bucket, stm, scratch);
+            let (psqt, pos) = self.evaluator.networks.small_net.evaluate(
+                &self.evaluator.acc_small,
+                bucket,
+                stm,
+                scratch,
+            );
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
             positional_val = pos;
@@ -211,11 +224,16 @@ impl NNUEProbe {
             if nnue_val.abs() < 236 {
                 // Use big
                 if self.scratch_big.is_none() {
-                    let half_dims = self.evaluator.big_net.feature_transformer.half_dims;
+                    let half_dims = self
+                        .evaluator
+                        .networks
+                        .big_net
+                        .feature_transformer
+                        .half_dims;
                     self.scratch_big = Some(ScratchBuffer::new(half_dims));
                 }
                 let scratch_big = self.scratch_big.as_mut().unwrap();
-                let (psqt_b, pos_b) = self.evaluator.big_net.evaluate(
+                let (psqt_b, pos_b) = self.evaluator.networks.big_net.evaluate(
                     &self.evaluator.acc_big,
                     bucket,
                     stm,
@@ -227,14 +245,21 @@ impl NNUEProbe {
             }
         } else {
             if self.scratch_big.is_none() {
-                let half_dims = self.evaluator.big_net.feature_transformer.half_dims;
+                let half_dims = self
+                    .evaluator
+                    .networks
+                    .big_net
+                    .feature_transformer
+                    .half_dims;
                 self.scratch_big = Some(ScratchBuffer::new(half_dims));
             }
             let scratch = self.scratch_big.as_mut().unwrap();
-            let (psqt, pos) =
-                self.evaluator
-                    .big_net
-                    .evaluate(&self.evaluator.acc_big, bucket, stm, scratch);
+            let (psqt, pos) = self.evaluator.networks.big_net.evaluate(
+                &self.evaluator.acc_big,
+                bucket,
+                stm,
+                scratch,
+            );
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
             positional_val = pos;

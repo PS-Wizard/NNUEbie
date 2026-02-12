@@ -13,7 +13,7 @@ pub mod uci;
 mod tests;
 
 pub use accumulator::Accumulator;
-pub use evaluator::Evaluator;
+pub use evaluator::{Evaluator, NnueNetworks};
 pub use feature_transformer::FeatureTransformer;
 pub use layers::Layer;
 pub use network::Network;

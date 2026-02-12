@@ -1,10 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use crate::evaluator::Evaluator;
+    use crate::evaluator::{Evaluator, NnueNetworks};
     use crate::features::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
     use crate::nnue::NNUEProbe;
     use crate::types::{Color, Piece};
     use crate::uci::{calculate_material, to_centipawns};
+    use std::sync::Arc;
 
     const BIG_NETWORK: &str = "archive/nnue/networks/nn-1c0000000000.nnue";
     const SMALL_NETWORK: &str = "archive/nnue/networks/nn-37f18f62d772.nnue";
@@ -113,7 +114,9 @@ mod tests {
 
     #[test]
     fn test_starting_position_eval() {
-        let mut eval = Evaluator::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks");
+        let networks =
+            Arc::new(NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks"));
+        let mut eval = Evaluator::new(networks);
 
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let (pieces, side) = parse_fen(fen);
@@ -129,7 +132,9 @@ mod tests {
 
     #[test]
     fn test_fen_eval_known_positions() {
-        let mut eval = Evaluator::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks");
+        let networks =
+            Arc::new(NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks"));
+        let mut eval = Evaluator::new(networks);
 
         let cases = vec![
             (

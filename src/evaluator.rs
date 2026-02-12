@@ -2,6 +2,7 @@ use crate::accumulator::Accumulator;
 use crate::features::{BISHOP, KING, KNIGHT, PAWN, QUEEN, ROOK};
 use crate::network::{Network, ScratchBuffer};
 use std::io;
+use std::sync::Arc;
 
 // Piece Values
 pub const PAWN_VALUE: i32 = 208;
@@ -10,9 +11,21 @@ pub const BISHOP_VALUE: i32 = 825;
 pub const ROOK_VALUE: i32 = 1276;
 pub const QUEEN_VALUE: i32 = 2538;
 
-pub struct Evaluator {
+pub struct NnueNetworks {
     pub big_net: Network,
     pub small_net: Network,
+}
+
+impl NnueNetworks {
+    pub fn new(big_path: &str, small_path: &str) -> io::Result<Self> {
+        let big_net = Network::load(big_path, true)?;
+        let small_net = Network::load(small_path, false)?;
+        Ok(Self { big_net, small_net })
+    }
+}
+
+pub struct Evaluator {
+    pub networks: Arc<NnueNetworks>,
     pub acc_big: Accumulator,
     pub acc_small: Accumulator,
     scratch_big: Option<ScratchBuffer>,
@@ -20,21 +33,17 @@ pub struct Evaluator {
 }
 
 impl Evaluator {
-    pub fn new(big_path: &str, small_path: &str) -> io::Result<Self> {
-        let big_net = Network::load(big_path, true)?;
-        let small_net = Network::load(small_path, false)?;
+    pub fn new(networks: Arc<NnueNetworks>) -> Self {
+        let acc_big = Accumulator::new(networks.big_net.feature_transformer.half_dims);
+        let acc_small = Accumulator::new(networks.small_net.feature_transformer.half_dims);
 
-        let acc_big = Accumulator::new(big_net.feature_transformer.half_dims);
-        let acc_small = Accumulator::new(small_net.feature_transformer.half_dims);
-
-        Ok(Self {
-            big_net,
-            small_net,
+        Self {
+            networks,
             acc_big,
             acc_small,
             scratch_big: None,
             scratch_small: None,
-        })
+        }
     }
 
     pub fn evaluate(&mut self, pieces: &[(usize, usize, usize)], side_to_move: usize) -> i32 {
@@ -92,17 +101,21 @@ impl Evaluator {
         let bucket = bucket.min(7);
 
         if use_small {
-            self.acc_small
-                .refresh(&simple_pieces, ksq, &self.small_net.feature_transformer);
+            self.acc_small.refresh(
+                &simple_pieces,
+                ksq,
+                &self.networks.small_net.feature_transformer,
+            );
 
             if self.scratch_small.is_none() {
-                let half_dims = self.small_net.feature_transformer.half_dims;
+                let half_dims = self.networks.small_net.feature_transformer.half_dims;
                 self.scratch_small = Some(ScratchBuffer::new(half_dims));
             }
             let scratch = self.scratch_small.as_mut().unwrap();
 
             let (psqt, pos) =
-                self.small_net
+                self.networks
+                    .small_net
                     .evaluate(&self.acc_small, bucket, side_to_move, scratch);
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
@@ -111,35 +124,45 @@ impl Evaluator {
             // Correction check
             if nnue_val.abs() < 236 {
                 // Re-evaluate with Big
-                self.acc_big
-                    .refresh(&simple_pieces, ksq, &self.big_net.feature_transformer);
+                self.acc_big.refresh(
+                    &simple_pieces,
+                    ksq,
+                    &self.networks.big_net.feature_transformer,
+                );
 
                 if self.scratch_big.is_none() {
-                    let half_dims = self.big_net.feature_transformer.half_dims;
+                    let half_dims = self.networks.big_net.feature_transformer.half_dims;
                     self.scratch_big = Some(ScratchBuffer::new(half_dims));
                 }
                 let scratch_big = self.scratch_big.as_mut().unwrap();
 
-                let (psqt_b, pos_b) =
-                    self.big_net
-                        .evaluate(&self.acc_big, bucket, side_to_move, scratch_big);
+                let (psqt_b, pos_b) = self.networks.big_net.evaluate(
+                    &self.acc_big,
+                    bucket,
+                    side_to_move,
+                    scratch_big,
+                );
                 nnue_val = (125 * psqt_b + 131 * pos_b) / 128;
             } else {
                 // Keep Small Net values
             }
         } else {
-            self.acc_big
-                .refresh(&simple_pieces, ksq, &self.big_net.feature_transformer);
+            self.acc_big.refresh(
+                &simple_pieces,
+                ksq,
+                &self.networks.big_net.feature_transformer,
+            );
 
             if self.scratch_big.is_none() {
-                let half_dims = self.big_net.feature_transformer.half_dims;
+                let half_dims = self.networks.big_net.feature_transformer.half_dims;
                 self.scratch_big = Some(ScratchBuffer::new(half_dims));
             }
             let scratch = self.scratch_big.as_mut().unwrap();
 
-            let (psqt, pos) = self
-                .big_net
-                .evaluate(&self.acc_big, bucket, side_to_move, scratch);
+            let (psqt, pos) =
+                self.networks
+                    .big_net
+                    .evaluate(&self.acc_big, bucket, side_to_move, scratch);
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
             positional_val = pos;
