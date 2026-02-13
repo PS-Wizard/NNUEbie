@@ -61,7 +61,7 @@ fn main() {
         std::hint::black_box(probe.evaluate(Color::White));
     }
 
-    let iterations = 1_000_000;
+    let iterations = 10_000_000;
     println!("Benchmarking {} evaluations...", iterations);
 
     // Benchmark Full Refresh
@@ -80,7 +80,7 @@ fn main() {
     // Reset to initial position
     probe.set_position(&pieces);
 
-    let iterations_inc = 1_000_000;
+    let iterations_inc = 10_000_000;
 
     let start = Instant::now();
     for i in 0..iterations_inc {

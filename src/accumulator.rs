@@ -6,12 +6,12 @@ use std::arch::x86_64::*;
 
 type FeatureUpdateFn = unsafe fn(&mut [i16], &[i16]);
 
-#[repr(align(64))]
 #[derive(Clone)]
 pub struct Accumulator<const SIZE: usize> {
-    pub accumulation: [[i16; SIZE]; 2],
-    pub psqt_accumulation: [[i32; 8]; 2], // Size 8
-    pub computed: [bool; 2],
+    // Use heap-allocated aligned memory
+    pub accumulation: [Box<[i16; SIZE]>; 2],
+    pub psqt_accumulation: [[i32; 8]; 2],
+    computed: [bool; 2],
     add_feature_fn: FeatureUpdateFn,
     remove_feature_fn: FeatureUpdateFn,
 }
@@ -43,13 +43,27 @@ impl<const SIZE: usize> Accumulator<SIZE> {
             remove_feature_scalar as FeatureUpdateFn,
         );
 
+        // Allocate aligned memory on heap
+        let acc0 = Box::new([0i16; SIZE]);
+        let acc1 = Box::new([0i16; SIZE]);
+
         Self {
-            accumulation: [[0; SIZE]; 2],
+            accumulation: [acc0, acc1],
             psqt_accumulation: [[0; 8]; 2],
             computed: [false, false],
             add_feature_fn: add_fn,
             remove_feature_fn: remove_fn,
         }
+    }
+
+    /// Get reference to accumulator for a perspective
+    pub fn get(&self, perspective: usize) -> &[i16] {
+        &*self.accumulation[perspective]
+    }
+
+    /// Get mutable reference to accumulator for a perspective
+    pub fn get_mut(&mut self, perspective: usize) -> &mut [i16] {
+        &mut *self.accumulation[perspective]
     }
 
     // Refresh accumulator from scratch
@@ -66,7 +80,7 @@ impl<const SIZE: usize> Accumulator<SIZE> {
             "FeatureTransformer dims mismatch Accumulator size"
         );
 
-        // Reset
+        // Reset - copy biases to each perspective
         for c in 0..2 {
             self.accumulation[c].copy_from_slice(&ft.biases);
             self.psqt_accumulation[c].fill(0);
@@ -174,28 +188,27 @@ unsafe fn add_feature_avx2(acc: &mut [i16], weights: &[i16]) {
     let count = acc.len();
 
     // Unroll by 4 (64 elements per iteration)
-    // 3072 is divisible by 64 (3072 / 64 = 48)
-    // 128 is divisible by 64 (128 / 64 = 2)
+    // Use unaligned loads for safety - Box doesn't guarantee alignment
     while i + 64 <= count {
         let w0 = _mm256_loadu_si256(w_ptr.add(i) as *const _);
         let w1 = _mm256_loadu_si256(w_ptr.add(i + 16) as *const _);
         let w2 = _mm256_loadu_si256(w_ptr.add(i + 32) as *const _);
         let w3 = _mm256_loadu_si256(w_ptr.add(i + 48) as *const _);
 
-        let a0 = _mm256_load_si256(acc_ptr.add(i) as *const _);
-        let a1 = _mm256_load_si256(acc_ptr.add(i + 16) as *const _);
-        let a2 = _mm256_load_si256(acc_ptr.add(i + 32) as *const _);
-        let a3 = _mm256_load_si256(acc_ptr.add(i + 48) as *const _);
+        let a0 = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+        let a1 = _mm256_loadu_si256(acc_ptr.add(i + 16) as *const _);
+        let a2 = _mm256_loadu_si256(acc_ptr.add(i + 32) as *const _);
+        let a3 = _mm256_loadu_si256(acc_ptr.add(i + 48) as *const _);
 
         let r0 = _mm256_add_epi16(a0, w0);
         let r1 = _mm256_add_epi16(a1, w1);
         let r2 = _mm256_add_epi16(a2, w2);
         let r3 = _mm256_add_epi16(a3, w3);
 
-        _mm256_store_si256(acc_ptr.add(i) as *mut _, r0);
-        _mm256_store_si256(acc_ptr.add(i + 16) as *mut _, r1);
-        _mm256_store_si256(acc_ptr.add(i + 32) as *mut _, r2);
-        _mm256_store_si256(acc_ptr.add(i + 48) as *mut _, r3);
+        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, r0);
+        _mm256_storeu_si256(acc_ptr.add(i + 16) as *mut _, r1);
+        _mm256_storeu_si256(acc_ptr.add(i + 32) as *mut _, r2);
+        _mm256_storeu_si256(acc_ptr.add(i + 48) as *mut _, r3);
 
         i += 64;
     }
@@ -203,9 +216,9 @@ unsafe fn add_feature_avx2(acc: &mut [i16], weights: &[i16]) {
     // Remainder loop (if size not multiple of 64)
     while i + 16 <= count {
         let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-        let a = _mm256_load_si256(acc_ptr.add(i) as *const _);
+        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
         let res = _mm256_add_epi16(a, w);
-        _mm256_store_si256(acc_ptr.add(i) as *mut _, res);
+        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
         i += 16;
     }
 
@@ -229,29 +242,29 @@ unsafe fn remove_feature_avx2(acc: &mut [i16], weights: &[i16]) {
         let w2 = _mm256_loadu_si256(w_ptr.add(i + 32) as *const _);
         let w3 = _mm256_loadu_si256(w_ptr.add(i + 48) as *const _);
 
-        let a0 = _mm256_load_si256(acc_ptr.add(i) as *const _);
-        let a1 = _mm256_load_si256(acc_ptr.add(i + 16) as *const _);
-        let a2 = _mm256_load_si256(acc_ptr.add(i + 32) as *const _);
-        let a3 = _mm256_load_si256(acc_ptr.add(i + 48) as *const _);
+        let a0 = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+        let a1 = _mm256_loadu_si256(acc_ptr.add(i + 16) as *const _);
+        let a2 = _mm256_loadu_si256(acc_ptr.add(i + 32) as *const _);
+        let a3 = _mm256_loadu_si256(acc_ptr.add(i + 48) as *const _);
 
         let r0 = _mm256_sub_epi16(a0, w0);
         let r1 = _mm256_sub_epi16(a1, w1);
         let r2 = _mm256_sub_epi16(a2, w2);
         let r3 = _mm256_sub_epi16(a3, w3);
 
-        _mm256_store_si256(acc_ptr.add(i) as *mut _, r0);
-        _mm256_store_si256(acc_ptr.add(i + 16) as *mut _, r1);
-        _mm256_store_si256(acc_ptr.add(i + 32) as *mut _, r2);
-        _mm256_store_si256(acc_ptr.add(i + 48) as *mut _, r3);
+        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, r0);
+        _mm256_storeu_si256(acc_ptr.add(i + 16) as *mut _, r1);
+        _mm256_storeu_si256(acc_ptr.add(i + 32) as *mut _, r2);
+        _mm256_storeu_si256(acc_ptr.add(i + 48) as *mut _, r3);
 
         i += 64;
     }
 
     while i + 16 <= count {
         let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-        let a = _mm256_load_si256(acc_ptr.add(i) as *const _);
+        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
         let res = _mm256_sub_epi16(a, w);
-        _mm256_store_si256(acc_ptr.add(i) as *mut _, res);
+        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
         i += 16;
     }
 
