@@ -137,25 +137,6 @@ impl<const SIZE: usize> Accumulator<SIZE> {
         }
     }
 
-    fn remove_feature(&mut self, perspective: usize, feature_idx: usize, ft: &FeatureTransformer) {
-        let half_dims = ft.half_dims;
-        let offset = feature_idx * half_dims;
-        let w_slice = &ft.weights[offset..offset + half_dims];
-
-        // Use selected implementation
-        unsafe {
-            (self.remove_feature_fn)(self.accumulation[perspective].as_mut_slice(), w_slice);
-        }
-
-        let psqt_offset = feature_idx * crate::feature_transformer::PSQT_BUCKETS;
-        let psqt_slice =
-            &ft.psqt_weights[psqt_offset..psqt_offset + crate::feature_transformer::PSQT_BUCKETS];
-
-        for (i, &pw) in psqt_slice.iter().enumerate() {
-            self.psqt_accumulation[perspective][i] -= pw;
-        }
-    }
-
     fn add_feature(&mut self, perspective: usize, feature_idx: usize, ft: &FeatureTransformer) {
         let half_dims = ft.half_dims;
         let offset = feature_idx * half_dims;
@@ -166,18 +147,75 @@ impl<const SIZE: usize> Accumulator<SIZE> {
             (self.add_feature_fn)(self.accumulation[perspective].as_mut_slice(), w_slice);
         }
 
-        // PSQT update
+        // PSQT update using SIMD
+        self.update_psqt(perspective, feature_idx, ft, true);
+    }
+
+    /// Update PSQT accumulation using SIMD when available
+    fn update_psqt(
+        &mut self,
+        perspective: usize,
+        feature_idx: usize,
+        ft: &FeatureTransformer,
+        add: bool,
+    ) {
         let psqt_offset = feature_idx * crate::feature_transformer::PSQT_BUCKETS;
         let psqt_slice =
             &ft.psqt_weights[psqt_offset..psqt_offset + crate::feature_transformer::PSQT_BUCKETS];
 
-        for (i, &pw) in psqt_slice.iter().enumerate() {
-            self.psqt_accumulation[perspective][i] += pw;
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                self.update_psqt_avx2(perspective, psqt_slice, add);
+                return;
+            }
+        }
+
+        // Scalar fallback
+        if add {
+            for (i, &pw) in psqt_slice.iter().enumerate() {
+                self.psqt_accumulation[perspective][i] += pw;
+            }
+        } else {
+            for (i, &pw) in psqt_slice.iter().enumerate() {
+                self.psqt_accumulation[perspective][i] -= pw;
+            }
         }
     }
-}
 
-// SIMD Implementations
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn update_psqt_avx2(&mut self, perspective: usize, psqt_slice: &[i32], add: bool) {
+        let acc_ptr = self.psqt_accumulation[perspective].as_mut_ptr();
+        let w_ptr = psqt_slice.as_ptr();
+
+        // Load 8 i32 elements (256 bits) - covers all PSQT_BUCKETS
+        let w = _mm256_loadu_si256(w_ptr as *const __m256i);
+        let a = _mm256_loadu_si256(acc_ptr as *const __m256i);
+
+        let res = if add {
+            _mm256_add_epi32(a, w)
+        } else {
+            _mm256_sub_epi32(a, w)
+        };
+
+        _mm256_storeu_si256(acc_ptr as *mut __m256i, res);
+    }
+
+    fn remove_feature(&mut self, perspective: usize, feature_idx: usize, ft: &FeatureTransformer) {
+        let half_dims = ft.half_dims;
+        let offset = feature_idx * half_dims;
+        let w_slice = &ft.weights[offset..offset + half_dims];
+
+        // Use selected implementation
+        unsafe {
+            (self.remove_feature_fn)(self.accumulation[perspective].as_mut_slice(), w_slice);
+        }
+
+        // PSQT update using SIMD
+        self.update_psqt(perspective, feature_idx, ft, false);
+    }
+}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
