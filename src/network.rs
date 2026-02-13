@@ -155,9 +155,9 @@ impl Network {
         })
     }
 
-    fn transform_features(
+    fn transform_features<const SIZE: usize>(
         &self,
-        accumulator: &Accumulator,
+        accumulator: &Accumulator<SIZE>,
         scratch: &mut ScratchBuffer,
         us: usize,
         them: usize,
@@ -170,6 +170,7 @@ impl Network {
         }
 
         let half_dims = self.feature_transformer.half_dims;
+        debug_assert_eq!(half_dims, SIZE);
 
         // Output filled: first half Us, second half Them.
         for p in 0..2 {
@@ -188,14 +189,15 @@ impl Network {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
-    unsafe fn transform_features_avx2(
+    unsafe fn transform_features_avx2<const SIZE: usize>(
         &self,
-        accumulator: &Accumulator,
+        accumulator: &Accumulator<SIZE>,
         scratch: &mut ScratchBuffer,
         us: usize,
         them: usize,
     ) {
         let half_dims = self.feature_transformer.half_dims;
+        debug_assert_eq!(half_dims, SIZE);
         let output_ptr = scratch.transformed_features.as_mut_ptr();
 
         for p in 0..2 {
@@ -236,9 +238,9 @@ impl Network {
         }
     }
 
-    pub fn evaluate(
+    pub fn evaluate<const SIZE: usize>(
         &self,
-        accumulator: &Accumulator,
+        accumulator: &Accumulator<SIZE>,
         bucket: usize,
         side_to_move: usize,
         scratch: &mut ScratchBuffer,

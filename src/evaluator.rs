@@ -26,16 +26,26 @@ impl NnueNetworks {
 
 pub struct Evaluator {
     pub networks: Arc<NnueNetworks>,
-    pub acc_big: Accumulator,
-    pub acc_small: Accumulator,
+    pub acc_big: Accumulator<3072>,
+    pub acc_small: Accumulator<128>,
     pub scratch_big: ScratchBuffer,
     pub scratch_small: ScratchBuffer,
 }
 
 impl Evaluator {
     pub fn new(networks: Arc<NnueNetworks>) -> Self {
-        let acc_big = Accumulator::new(networks.big_net.feature_transformer.half_dims);
-        let acc_small = Accumulator::new(networks.small_net.feature_transformer.half_dims);
+        // Ensure network dimensions match our compiled-in accumulator sizes
+        assert_eq!(
+            networks.big_net.feature_transformer.half_dims, 3072,
+            "Big network half_dims must be 3072"
+        );
+        assert_eq!(
+            networks.small_net.feature_transformer.half_dims, 128,
+            "Small network half_dims must be 128"
+        );
+
+        let acc_big = Accumulator::<3072>::new();
+        let acc_small = Accumulator::<128>::new();
 
         let scratch_big = ScratchBuffer::new(networks.big_net.feature_transformer.half_dims);
         let scratch_small = ScratchBuffer::new(networks.small_net.feature_transformer.half_dims);

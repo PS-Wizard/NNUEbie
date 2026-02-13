@@ -6,17 +6,24 @@ use std::arch::x86_64::*;
 
 type FeatureUpdateFn = unsafe fn(&mut [i16], &[i16]);
 
+#[repr(align(64))]
 #[derive(Clone)]
-pub struct Accumulator {
-    pub accumulation: [Vec<i16>; 2],
-    pub psqt_accumulation: [Vec<i32>; 2], // Size 8
+pub struct Accumulator<const SIZE: usize> {
+    pub accumulation: [[i16; SIZE]; 2],
+    pub psqt_accumulation: [[i32; 8]; 2], // Size 8
     pub computed: [bool; 2],
     add_feature_fn: FeatureUpdateFn,
     remove_feature_fn: FeatureUpdateFn,
 }
 
-impl Accumulator {
-    pub fn new(size: usize) -> Self {
+impl<const SIZE: usize> Default for Accumulator<SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const SIZE: usize> Accumulator<SIZE> {
+    pub fn new() -> Self {
         #[cfg(target_arch = "x86_64")]
         let (add_fn, remove_fn) = if is_x86_feature_detected!("avx2") {
             (
@@ -37,8 +44,8 @@ impl Accumulator {
         );
 
         Self {
-            accumulation: [vec![0; size], vec![0; size]],
-            psqt_accumulation: [vec![0; 8], vec![0; 8]],
+            accumulation: [[0; SIZE]; 2],
+            psqt_accumulation: [[0; 8]; 2],
             computed: [false, false],
             add_feature_fn: add_fn,
             remove_feature_fn: remove_fn,
@@ -54,6 +61,11 @@ impl Accumulator {
         ksq: [usize; 2],
         ft: &FeatureTransformer,
     ) {
+        debug_assert_eq!(
+            ft.half_dims, SIZE,
+            "FeatureTransformer dims mismatch Accumulator size"
+        );
+
         // Reset
         for c in 0..2 {
             self.accumulation[c].copy_from_slice(&ft.biases);
@@ -85,6 +97,11 @@ impl Accumulator {
         ksq: [usize; 2],
         ft: &FeatureTransformer,
     ) {
+        debug_assert_eq!(
+            ft.half_dims, SIZE,
+            "FeatureTransformer dims mismatch Accumulator size"
+        );
+
         for &(sq, pc) in removed {
             // White Perspective
             let idx_w = make_index(features::WHITE, sq, pc, ksq[features::WHITE]);
@@ -214,10 +231,9 @@ mod tests {
 
     #[test]
     fn test_accumulator_new() {
-        let size = 128;
-        let acc = Accumulator::new(size);
-        assert_eq!(acc.accumulation[0].len(), size);
-        assert_eq!(acc.accumulation[1].len(), size);
+        let acc = Accumulator::<128>::new();
+        assert_eq!(acc.accumulation[0].len(), 128);
+        assert_eq!(acc.accumulation[1].len(), 128);
         assert_eq!(acc.computed, [false, false]);
     }
 }
