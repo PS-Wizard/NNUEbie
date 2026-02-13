@@ -1,4 +1,5 @@
 pub mod accumulator;
+pub mod accumulator_stack;
 pub mod evaluator;
 pub mod feature_transformer;
 pub mod features;
@@ -13,6 +14,7 @@ pub mod uci;
 mod tests;
 
 pub use accumulator::Accumulator;
+pub use accumulator_stack::{AccumulatorStack, AccumulatorState, DirtyPiece};
 pub use evaluator::{Evaluator, NnueNetworks};
 pub use feature_transformer::FeatureTransformer;
 pub use layers::Layer;

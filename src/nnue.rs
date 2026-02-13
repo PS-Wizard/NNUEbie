@@ -1,19 +1,10 @@
+use crate::accumulator_stack::{AccumulatorStack, DirtyPiece};
 use crate::evaluator::{
     Evaluator, NnueNetworks, BISHOP_VALUE, KNIGHT_VALUE, PAWN_VALUE, QUEEN_VALUE, ROOK_VALUE,
 };
 use crate::types::{Color, Piece, Square};
 use std::io;
 use std::sync::Arc;
-
-const MAX_CHANGES: usize = 3; // Move, Capture, Promotion (remove pawn, add piece)
-
-#[derive(Clone, Copy)]
-struct PendingUpdate {
-    removed: [(usize, usize); MAX_CHANGES],
-    added: [(usize, usize); MAX_CHANGES],
-    r_len: usize,
-    a_len: usize,
-}
 
 pub struct NNUEProbe {
     evaluator: Evaluator,
@@ -22,7 +13,7 @@ pub struct NNUEProbe {
     piece_count: usize,
     pawn_count: [i32; 2],
     non_pawn_material: [i32; 2],
-    lazy_buffer: Vec<PendingUpdate>,
+    accumulator_stack: AccumulatorStack,
 }
 
 impl NNUEProbe {
@@ -40,10 +31,11 @@ impl NNUEProbe {
             piece_count: 0,
             pawn_count: [0; 2],
             non_pawn_material: [0; 2],
-            lazy_buffer: Vec::with_capacity(32),
+            accumulator_stack: AccumulatorStack::new(),
         })
     }
 
+    /// Set the root position - this does a full refresh
     pub fn set_position(&mut self, pieces: &[(Piece, Square)]) {
         // Reset state
         self.pieces = [Piece::None; 64];
@@ -51,13 +43,13 @@ impl NNUEProbe {
         self.pawn_count = [0; 2];
         self.non_pawn_material = [0; 2];
         self.king_squares = [0; 2];
-        self.lazy_buffer.clear();
+        self.accumulator_stack.reset();
 
         for &(piece, square) in pieces {
             self.add_piece_internal(piece, square);
         }
 
-        self.refresh();
+        self.refresh_accumulators();
     }
 
     fn add_piece_internal(&mut self, piece: Piece, square: Square) {
@@ -120,29 +112,79 @@ impl NNUEProbe {
         }
     }
 
-    fn flush_lazy_buffer(&mut self) {
-        if self.lazy_buffer.is_empty() {
-            return;
+    /// Make a move - pushes new state onto accumulator stack
+    pub fn make_move(&mut self, from_sq: Square, to_sq: Square, piece: Piece) {
+        // Build dirty piece info
+        let mut dirty = DirtyPiece::new();
+
+        let from_piece = self.pieces[from_sq];
+        let to_piece = self.pieces[to_sq]; // Captured piece, if any
+
+        // Remove piece from source
+        self.remove_piece_internal(from_sq);
+
+        // Remove captured piece from destination (if any)
+        if to_piece != Piece::None {
+            dirty.add_change(to_sq, to_sq, to_piece.index(), 0);
         }
 
-        let ft_big = &self.evaluator.networks.big_net.feature_transformer;
-        for update in &self.lazy_buffer {
-            self.evaluator.acc_big.update_with_ksq(
-                &update.added[..update.a_len],
-                &update.removed[..update.r_len],
+        // Add piece to destination
+        self.add_piece_internal(piece, to_sq);
+
+        // Record the move
+        dirty.add_change(from_sq, to_sq, from_piece.index(), piece.index());
+
+        // Push onto stack
+        self.accumulator_stack.push(&dirty);
+
+        // Update accumulators incrementally (unless king moved)
+        if piece.is_king() {
+            // King moves require special handling - do full refresh
+            self.refresh_accumulators();
+        } else {
+            // Incremental update
+            self.accumulator_stack.update_incremental(
                 self.king_squares,
-                ft_big,
+                &self.evaluator.networks.big_net.feature_transformer,
+                &self.evaluator.networks.small_net.feature_transformer,
             );
         }
-        self.lazy_buffer.clear();
     }
 
+    /// Unmake a move - pops state from accumulator stack (O(1)!)
+    pub fn unmake_move(
+        &mut self,
+        from_sq: Square,
+        to_sq: Square,
+        from_piece: Piece,
+        captured_piece: Option<Piece>,
+    ) {
+        // Restore the piece state (inverse of make_move)
+        self.remove_piece_internal(to_sq);
+
+        if let Some(captured) = captured_piece {
+            self.add_piece_internal(captured, to_sq);
+        }
+
+        self.add_piece_internal(from_piece, from_sq);
+
+        // Pop from stack - O(1)!
+        self.accumulator_stack.pop();
+    }
+
+    /// Legacy update method - applies changes directly to current accumulators
+    /// Does NOT use the stack - for one-off evaluations only
     pub fn update(&mut self, removed: &[(Piece, Square)], added: &[(Piece, Square)]) {
+        let mut removed_mapped: Vec<(usize, usize)> = Vec::with_capacity(removed.len());
+        let mut added_mapped: Vec<(usize, usize)> = Vec::with_capacity(added.len());
+
+        // Track if king moved
         let mut king_moved = false;
 
         // Apply removals
         for &(piece, square) in removed {
-            let _removed_piece = self.remove_piece_internal(square);
+            self.remove_piece_internal(square);
+            removed_mapped.push((square, piece.index()));
             if piece.is_king() {
                 king_moved = true;
             }
@@ -151,60 +193,35 @@ impl NNUEProbe {
         // Apply additions
         for &(piece, square) in added {
             self.add_piece_internal(piece, square);
+            added_mapped.push((square, piece.index()));
             if piece.is_king() {
                 king_moved = true;
             }
         }
 
         if king_moved {
-            self.lazy_buffer.clear();
-            self.refresh();
+            // Full refresh required
+            self.refresh_accumulators();
         } else {
-            // Incremental update
-            let mut pending = PendingUpdate {
-                removed: [(0, 0); MAX_CHANGES],
-                added: [(0, 0); MAX_CHANGES],
-                r_len: 0,
-                a_len: 0,
-            };
+            // Direct incremental update on current stack position
+            let state = self.accumulator_stack.mut_latest();
 
-            for &(p, s) in removed {
-                if pending.r_len < MAX_CHANGES {
-                    pending.removed[pending.r_len] = (s, p.index());
-                    pending.r_len += 1;
-                }
-            }
-
-            for &(p, s) in added {
-                if pending.a_len < MAX_CHANGES {
-                    pending.added[pending.a_len] = (s, p.index());
-                    pending.a_len += 1;
-                }
-            }
-
-            let removed_slice = &pending.removed[..pending.r_len];
-            let added_slice = &pending.added[..pending.a_len];
-
-            // Update Small Net Immediately
-            let ft_small = &self.evaluator.networks.small_net.feature_transformer;
-            self.evaluator.acc_small.update_with_ksq(
-                added_slice,
-                removed_slice,
+            state.acc_big.update_with_ksq(
+                &added_mapped,
+                &removed_mapped,
                 self.king_squares,
-                ft_small,
+                &self.evaluator.networks.big_net.feature_transformer,
             );
-
-            // Buffer Big Net Update
-            self.lazy_buffer.push(pending);
-
-            // Flush if too many pending
-            if self.lazy_buffer.len() >= 32 {
-                self.flush_lazy_buffer();
-            }
+            state.acc_small.update_with_ksq(
+                &added_mapped,
+                &removed_mapped,
+                self.king_squares,
+                &self.evaluator.networks.small_net.feature_transformer,
+            );
         }
     }
 
-    pub fn refresh(&mut self) {
+    fn refresh_accumulators(&mut self) {
         // Collect all pieces
         let mut pieces_idx = Vec::with_capacity(self.piece_count);
         for sq in 0..64 {
@@ -214,15 +231,12 @@ impl NNUEProbe {
             }
         }
 
-        let ft_big = &self.evaluator.networks.big_net.feature_transformer;
-        self.evaluator
-            .acc_big
-            .refresh(&pieces_idx, self.king_squares, ft_big);
-
-        let ft_small = &self.evaluator.networks.small_net.feature_transformer;
-        self.evaluator
-            .acc_small
-            .refresh(&pieces_idx, self.king_squares, ft_small);
+        self.accumulator_stack.refresh(
+            &pieces_idx,
+            self.king_squares,
+            &self.evaluator.networks.big_net.feature_transformer,
+            &self.evaluator.networks.small_net.feature_transformer,
+        );
     }
 
     pub fn evaluate(&mut self, side_to_move: Color) -> i32 {
@@ -243,9 +257,12 @@ impl NNUEProbe {
         let mut psqt_val;
         let mut positional_val;
 
+        // Get latest accumulator state from stack
+        let latest_state = self.accumulator_stack.latest();
+
         if use_small {
             let (psqt, pos) = self.evaluator.networks.small_net.evaluate(
-                &self.evaluator.acc_small,
+                &latest_state.acc_small,
                 bucket,
                 stm,
                 &mut self.evaluator.scratch_small,
@@ -255,12 +272,9 @@ impl NNUEProbe {
             positional_val = pos;
 
             if nnue_val.abs() < 236 {
-                // Use big
-                // Flush pending updates first!
-                self.flush_lazy_buffer();
-
+                // Use big network
                 let (psqt_b, pos_b) = self.evaluator.networks.big_net.evaluate(
-                    &self.evaluator.acc_big,
+                    &latest_state.acc_big,
                     bucket,
                     stm,
                     &mut self.evaluator.scratch_big,
@@ -270,12 +284,9 @@ impl NNUEProbe {
                 positional_val = pos_b;
             }
         } else {
-            // Use big
-            // Flush pending updates first!
-            self.flush_lazy_buffer();
-
+            // Use big network
             let (psqt, pos) = self.evaluator.networks.big_net.evaluate(
-                &self.evaluator.acc_big,
+                &latest_state.acc_big,
                 bucket,
                 stm,
                 &mut self.evaluator.scratch_big,
