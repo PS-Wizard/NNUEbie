@@ -2,6 +2,7 @@ use crate::accumulator_stack::{AccumulatorStack, DirtyPiece};
 use crate::evaluator::{
     Evaluator, NnueNetworks, BISHOP_VALUE, KNIGHT_VALUE, PAWN_VALUE, QUEEN_VALUE, ROOK_VALUE,
 };
+use crate::finny_tables::FinnyTables;
 use crate::types::{Color, Piece, Square};
 use std::io;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ pub struct NNUEProbe {
     pawn_count: [i32; 2],
     non_pawn_material: [i32; 2],
     accumulator_stack: AccumulatorStack,
+    finny_tables: FinnyTables,
 }
 
 impl NNUEProbe {
@@ -24,6 +26,14 @@ impl NNUEProbe {
 
     pub fn with_networks(networks: Arc<NnueNetworks>) -> io::Result<Self> {
         let evaluator = Evaluator::new(networks);
+        let mut finny_tables = FinnyTables::new();
+
+        // Initialize with biases
+        finny_tables.clear(
+            &evaluator.networks.big_net.feature_transformer.biases,
+            &evaluator.networks.small_net.feature_transformer.biases,
+        );
+
         Ok(Self {
             evaluator,
             pieces: [Piece::None; 64],
@@ -32,6 +42,7 @@ impl NNUEProbe {
             pawn_count: [0; 2],
             non_pawn_material: [0; 2],
             accumulator_stack: AccumulatorStack::new(),
+            finny_tables,
         })
     }
 
@@ -139,8 +150,8 @@ impl NNUEProbe {
 
         // Update accumulators incrementally (unless king moved)
         if piece.is_king() {
-            // King moves require special handling - do full refresh
-            self.refresh_accumulators();
+            // King moves - try to use Finny Tables for faster refresh
+            self.refresh_with_cache();
         } else {
             // Incremental update
             self.accumulator_stack.update_incremental(
@@ -237,6 +248,69 @@ impl NNUEProbe {
             &self.evaluator.networks.big_net.feature_transformer,
             &self.evaluator.networks.small_net.feature_transformer,
         );
+    }
+
+    /// Refresh accumulators using Finny Tables for potential speedup
+    /// Tries to use cached state from previous positions with same king square
+    fn refresh_with_cache(&mut self) {
+        // Collect all pieces
+        let mut pieces_idx: Vec<(usize, usize)> = Vec::with_capacity(self.piece_count);
+        let mut white_bb: u64 = 0;
+        let mut black_bb: u64 = 0;
+
+        for sq in 0..64 {
+            let p = self.pieces[sq];
+            if p != Piece::None {
+                pieces_idx.push((sq, p.index()));
+                let color = p.index() / 8;
+                if color == 0 {
+                    white_bb |= 1u64 << sq;
+                } else {
+                    black_bb |= 1u64 << sq;
+                }
+            }
+        }
+
+        let state = self.accumulator_stack.mut_latest();
+
+        // Try to use Finny Tables for big network
+        let cache_used_big = self.finny_tables.cache_big.try_refresh(
+            &mut state.acc_big,
+            &pieces_idx,
+            self.king_squares,
+            &self.evaluator.networks.big_net.feature_transformer,
+        );
+
+        // Try to use Finny Tables for small network
+        let cache_used_small = self.finny_tables.cache_small.try_refresh(
+            &mut state.acc_small,
+            &pieces_idx,
+            self.king_squares,
+            &self.evaluator.networks.small_net.feature_transformer,
+        );
+
+        if !cache_used_big || !cache_used_small {
+            // Cache miss - do full refresh
+            self.accumulator_stack.refresh(
+                &pieces_idx,
+                self.king_squares,
+                &self.evaluator.networks.big_net.feature_transformer,
+                &self.evaluator.networks.small_net.feature_transformer,
+            );
+
+            // Update cache with the new state
+            let state = self.accumulator_stack.latest();
+            self.finny_tables.cache_big.update_cache(
+                &state.acc_big,
+                &pieces_idx,
+                self.king_squares,
+            );
+            self.finny_tables.cache_small.update_cache(
+                &state.acc_small,
+                &pieces_idx,
+                self.king_squares,
+            );
+        }
     }
 
     pub fn evaluate(&mut self, side_to_move: Color) -> i32 {
