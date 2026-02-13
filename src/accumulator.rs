@@ -173,16 +173,43 @@ unsafe fn add_feature_avx2(acc: &mut [i16], weights: &[i16]) {
     let w_ptr = weights.as_ptr();
     let count = acc.len();
 
-    // Process 16 elements at a time
-    for _ in 0..(count / 16) {
+    // Unroll by 4 (64 elements per iteration)
+    // 3072 is divisible by 64 (3072 / 64 = 48)
+    // 128 is divisible by 64 (128 / 64 = 2)
+    while i + 64 <= count {
+        let w0 = _mm256_loadu_si256(w_ptr.add(i) as *const _);
+        let w1 = _mm256_loadu_si256(w_ptr.add(i + 16) as *const _);
+        let w2 = _mm256_loadu_si256(w_ptr.add(i + 32) as *const _);
+        let w3 = _mm256_loadu_si256(w_ptr.add(i + 48) as *const _);
+
+        let a0 = _mm256_load_si256(acc_ptr.add(i) as *const _);
+        let a1 = _mm256_load_si256(acc_ptr.add(i + 16) as *const _);
+        let a2 = _mm256_load_si256(acc_ptr.add(i + 32) as *const _);
+        let a3 = _mm256_load_si256(acc_ptr.add(i + 48) as *const _);
+
+        let r0 = _mm256_add_epi16(a0, w0);
+        let r1 = _mm256_add_epi16(a1, w1);
+        let r2 = _mm256_add_epi16(a2, w2);
+        let r3 = _mm256_add_epi16(a3, w3);
+
+        _mm256_store_si256(acc_ptr.add(i) as *mut _, r0);
+        _mm256_store_si256(acc_ptr.add(i + 16) as *mut _, r1);
+        _mm256_store_si256(acc_ptr.add(i + 32) as *mut _, r2);
+        _mm256_store_si256(acc_ptr.add(i + 48) as *mut _, r3);
+
+        i += 64;
+    }
+
+    // Remainder loop (if size not multiple of 64)
+    while i + 16 <= count {
         let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+        let a = _mm256_load_si256(acc_ptr.add(i) as *const _);
         let res = _mm256_add_epi16(a, w);
-        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
+        _mm256_store_si256(acc_ptr.add(i) as *mut _, res);
         i += 16;
     }
 
-    // Handle remainder
+    // Scalar remainder
     for j in i..count {
         *acc_ptr.add(j) += *w_ptr.add(j) as i16;
     }
@@ -196,16 +223,38 @@ unsafe fn remove_feature_avx2(acc: &mut [i16], weights: &[i16]) {
     let w_ptr = weights.as_ptr();
     let count = acc.len();
 
-    // Process 16 elements at a time
-    for _ in 0..(count / 16) {
+    while i + 64 <= count {
+        let w0 = _mm256_loadu_si256(w_ptr.add(i) as *const _);
+        let w1 = _mm256_loadu_si256(w_ptr.add(i + 16) as *const _);
+        let w2 = _mm256_loadu_si256(w_ptr.add(i + 32) as *const _);
+        let w3 = _mm256_loadu_si256(w_ptr.add(i + 48) as *const _);
+
+        let a0 = _mm256_load_si256(acc_ptr.add(i) as *const _);
+        let a1 = _mm256_load_si256(acc_ptr.add(i + 16) as *const _);
+        let a2 = _mm256_load_si256(acc_ptr.add(i + 32) as *const _);
+        let a3 = _mm256_load_si256(acc_ptr.add(i + 48) as *const _);
+
+        let r0 = _mm256_sub_epi16(a0, w0);
+        let r1 = _mm256_sub_epi16(a1, w1);
+        let r2 = _mm256_sub_epi16(a2, w2);
+        let r3 = _mm256_sub_epi16(a3, w3);
+
+        _mm256_store_si256(acc_ptr.add(i) as *mut _, r0);
+        _mm256_store_si256(acc_ptr.add(i + 16) as *mut _, r1);
+        _mm256_store_si256(acc_ptr.add(i + 32) as *mut _, r2);
+        _mm256_store_si256(acc_ptr.add(i + 48) as *mut _, r3);
+
+        i += 64;
+    }
+
+    while i + 16 <= count {
         let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+        let a = _mm256_load_si256(acc_ptr.add(i) as *const _);
         let res = _mm256_sub_epi16(a, w);
-        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
+        _mm256_store_si256(acc_ptr.add(i) as *mut _, res);
         i += 16;
     }
 
-    // Handle remainder
     for j in i..count {
         *acc_ptr.add(j) -= *w_ptr.add(j) as i16;
     }

@@ -5,6 +5,16 @@ use crate::types::{Color, Piece, Square};
 use std::io;
 use std::sync::Arc;
 
+const MAX_CHANGES: usize = 3; // Move, Capture, Promotion (remove pawn, add piece)
+
+#[derive(Clone, Copy)]
+struct PendingUpdate {
+    removed: [(usize, usize); MAX_CHANGES],
+    added: [(usize, usize); MAX_CHANGES],
+    r_len: usize,
+    a_len: usize,
+}
+
 pub struct NNUEProbe {
     evaluator: Evaluator,
     pieces: [Piece; 64],
@@ -12,6 +22,7 @@ pub struct NNUEProbe {
     piece_count: usize,
     pawn_count: [i32; 2],
     non_pawn_material: [i32; 2],
+    lazy_buffer: Vec<PendingUpdate>,
 }
 
 impl NNUEProbe {
@@ -29,6 +40,7 @@ impl NNUEProbe {
             piece_count: 0,
             pawn_count: [0; 2],
             non_pawn_material: [0; 2],
+            lazy_buffer: Vec::with_capacity(32),
         })
     }
 
@@ -39,6 +51,7 @@ impl NNUEProbe {
         self.pawn_count = [0; 2];
         self.non_pawn_material = [0; 2];
         self.king_squares = [0; 2];
+        self.lazy_buffer.clear();
 
         for &(piece, square) in pieces {
             self.add_piece_internal(piece, square);
@@ -107,13 +120,29 @@ impl NNUEProbe {
         }
     }
 
+    fn flush_lazy_buffer(&mut self) {
+        if self.lazy_buffer.is_empty() {
+            return;
+        }
+
+        let ft_big = &self.evaluator.networks.big_net.feature_transformer;
+        for update in &self.lazy_buffer {
+            self.evaluator.acc_big.update_with_ksq(
+                &update.added[..update.a_len],
+                &update.removed[..update.r_len],
+                self.king_squares,
+                ft_big,
+            );
+        }
+        self.lazy_buffer.clear();
+    }
+
     pub fn update(&mut self, removed: &[(Piece, Square)], added: &[(Piece, Square)]) {
         let mut king_moved = false;
 
         // Apply removals
         for &(piece, square) in removed {
             let _removed_piece = self.remove_piece_internal(square);
-            // Debug assertion could go here
             if piece.is_king() {
                 king_moved = true;
             }
@@ -128,39 +157,35 @@ impl NNUEProbe {
         }
 
         if king_moved {
+            self.lazy_buffer.clear();
             self.refresh();
         } else {
             // Incremental update
-            // Map pieces to (Square, PieceIndex)
-            // Use stack allocation to avoid Vec overhead
-            const MAX_CHANGES: usize = 32;
-            let mut removed_mapped = [(0, 0); MAX_CHANGES];
-            let mut removed_len = 0;
+            let mut pending = PendingUpdate {
+                removed: [(0, 0); MAX_CHANGES],
+                added: [(0, 0); MAX_CHANGES],
+                r_len: 0,
+                a_len: 0,
+            };
 
             for &(p, s) in removed {
-                removed_mapped[removed_len] = (s, p.index());
-                removed_len += 1;
+                if pending.r_len < MAX_CHANGES {
+                    pending.removed[pending.r_len] = (s, p.index());
+                    pending.r_len += 1;
+                }
             }
-
-            let mut added_mapped = [(0, 0); MAX_CHANGES];
-            let mut added_len = 0;
 
             for &(p, s) in added {
-                added_mapped[added_len] = (s, p.index());
-                added_len += 1;
+                if pending.a_len < MAX_CHANGES {
+                    pending.added[pending.a_len] = (s, p.index());
+                    pending.a_len += 1;
+                }
             }
 
-            let removed_slice = &removed_mapped[..removed_len];
-            let added_slice = &added_mapped[..added_len];
+            let removed_slice = &pending.removed[..pending.r_len];
+            let added_slice = &pending.added[..pending.a_len];
 
-            let ft_big = &self.evaluator.networks.big_net.feature_transformer;
-            self.evaluator.acc_big.update_with_ksq(
-                added_slice,
-                removed_slice,
-                self.king_squares,
-                ft_big,
-            );
-
+            // Update Small Net Immediately
             let ft_small = &self.evaluator.networks.small_net.feature_transformer;
             self.evaluator.acc_small.update_with_ksq(
                 added_slice,
@@ -168,6 +193,14 @@ impl NNUEProbe {
                 self.king_squares,
                 ft_small,
             );
+
+            // Buffer Big Net Update
+            self.lazy_buffer.push(pending);
+
+            // Flush if too many pending
+            if self.lazy_buffer.len() >= 32 {
+                self.flush_lazy_buffer();
+            }
         }
     }
 
@@ -223,6 +256,9 @@ impl NNUEProbe {
 
             if nnue_val.abs() < 236 {
                 // Use big
+                // Flush pending updates first!
+                self.flush_lazy_buffer();
+
                 let (psqt_b, pos_b) = self.evaluator.networks.big_net.evaluate(
                     &self.evaluator.acc_big,
                     bucket,
@@ -234,6 +270,10 @@ impl NNUEProbe {
                 positional_val = pos_b;
             }
         } else {
+            // Use big
+            // Flush pending updates first!
+            self.flush_lazy_buffer();
+
             let (psqt, pos) = self.evaluator.networks.big_net.evaluate(
                 &self.evaluator.acc_big,
                 bucket,
