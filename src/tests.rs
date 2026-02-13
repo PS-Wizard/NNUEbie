@@ -447,3 +447,205 @@ mod manual_verification {
         assert!(diff == 0, "Should be close (diff={})", diff);
     }
 }
+
+#[cfg(test)]
+mod multithreaded_tests {
+    use crate::{Color, NNUEProbe, NnueNetworks, Piece};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    const BIG_NETWORK: &str = "archive/nnue/networks/nn-1c0000000000.nnue";
+    const SMALL_NETWORK: &str = "archive/nnue/networks/nn-37f18f62d772.nnue";
+
+    fn get_startpos_pieces() -> Vec<(Piece, usize)> {
+        vec![
+            (Piece::WhiteRook, 0),
+            (Piece::WhiteKnight, 1),
+            (Piece::WhiteBishop, 2),
+            (Piece::WhiteQueen, 3),
+            (Piece::WhiteKing, 4),
+            (Piece::WhiteBishop, 5),
+            (Piece::WhiteKnight, 6),
+            (Piece::WhiteRook, 7),
+            (Piece::WhitePawn, 8),
+            (Piece::WhitePawn, 9),
+            (Piece::WhitePawn, 10),
+            (Piece::WhitePawn, 11),
+            (Piece::WhitePawn, 12),
+            (Piece::WhitePawn, 13),
+            (Piece::WhitePawn, 14),
+            (Piece::WhitePawn, 15),
+            (Piece::BlackPawn, 48),
+            (Piece::BlackPawn, 49),
+            (Piece::BlackPawn, 50),
+            (Piece::BlackPawn, 51),
+            (Piece::BlackPawn, 52),
+            (Piece::BlackPawn, 53),
+            (Piece::BlackPawn, 54),
+            (Piece::BlackPawn, 55),
+            (Piece::BlackRook, 56),
+            (Piece::BlackKnight, 57),
+            (Piece::BlackBishop, 58),
+            (Piece::BlackQueen, 59),
+            (Piece::BlackKing, 60),
+            (Piece::BlackBishop, 61),
+            (Piece::BlackKnight, 62),
+            (Piece::BlackRook, 63),
+        ]
+    }
+
+    #[test]
+    fn test_multithreaded_evaluation_consistency() {
+        println!("\n=== Multi-threaded Evaluation Consistency Test ===\n");
+
+        let networks = Arc::new(
+            NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("Failed to load networks"),
+        );
+
+        let num_threads = 8;
+        let iterations_per_thread = 1000;
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let mut handles = vec![];
+
+        // Single-threaded reference evaluation
+        let pieces = get_startpos_pieces();
+        let mut probe_ref =
+            NNUEProbe::with_networks(networks.clone()).expect("Failed to create reference probe");
+        probe_ref.set_position(&pieces);
+        let reference_score = probe_ref.evaluate(Color::White);
+        println!("Reference score (single-threaded): {}", reference_score);
+
+        // Spawn threads
+        for thread_id in 0..num_threads {
+            let networks_clone = networks.clone();
+            let barrier_clone = barrier.clone();
+            let pieces_clone = pieces.clone();
+
+            let handle = thread::spawn(move || {
+                let mut probe = NNUEProbe::with_networks(networks_clone)
+                    .expect("Failed to create thread-local probe");
+
+                probe.set_position(&pieces_clone);
+
+                // Synchronize all threads
+                barrier_clone.wait();
+
+                let mut scores = vec![];
+
+                for i in 0..iterations_per_thread {
+                    // Alternate between moves to stress test
+                    if i % 2 == 0 {
+                        probe.update(&[(Piece::WhitePawn, 12)], &[(Piece::WhitePawn, 28)]);
+                    } else {
+                        probe.update(&[(Piece::WhitePawn, 28)], &[(Piece::WhitePawn, 12)]);
+                    }
+
+                    let score = probe.evaluate(Color::White);
+                    scores.push(score);
+                }
+
+                (thread_id, scores)
+            });
+
+            handles.push(handle);
+        }
+
+        // Collect results
+        let mut all_thread_scores: Vec<Vec<i32>> = vec![];
+        for handle in handles {
+            let (_thread_id, scores) = handle.join().unwrap();
+            all_thread_scores.push(scores);
+        }
+
+        // Verify consistency
+        println!(
+            "Verifying {} threads × {} iterations = {} total evaluations",
+            num_threads,
+            iterations_per_thread,
+            num_threads * iterations_per_thread
+        );
+
+        // Check that all threads got the same scores for the same positions
+        // (positions alternate, so scores at even indices should match)
+        let mut all_match = true;
+        for i in (0..iterations_per_thread).step_by(2) {
+            let first_thread_score = all_thread_scores[0][i];
+            for thread_scores in &all_thread_scores[1..] {
+                if thread_scores[i] != first_thread_score {
+                    all_match = false;
+                    println!(
+                        "Mismatch at index {}: thread 0 got {}, other got {}",
+                        i, first_thread_score, thread_scores[i]
+                    );
+                    break;
+                }
+            }
+            if !all_match {
+                break;
+            }
+        }
+
+        println!("All threads consistent: {}", all_match);
+        assert!(all_match, "Multi-threaded evaluations should be consistent");
+        println!("Multi-threaded consistency test PASSED");
+    }
+
+    #[test]
+    fn test_thread_safety_no_data_races() {
+        println!("\n=== Thread Safety Test (No Data Races) ===\n");
+
+        let networks = Arc::new(
+            NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("Failed to load networks"),
+        );
+
+        let num_threads = 16; // Stress test with many threads
+        let iterations = 10_000;
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let mut handles = vec![];
+
+        let pieces = get_startpos_pieces();
+
+        for _thread_id in 0..num_threads {
+            let networks_clone = networks.clone();
+            let barrier_clone = barrier.clone();
+            let pieces_clone = pieces.clone();
+
+            let handle = thread::spawn(move || {
+                let mut probe = NNUEProbe::with_networks(networks_clone)
+                    .expect("Failed to create thread-local probe");
+
+                probe.set_position(&pieces_clone);
+
+                // Synchronize
+                barrier_clone.wait();
+
+                // Heavy evaluation load
+                for _ in 0..iterations {
+                    let _score = probe.evaluate(Color::White);
+                    // Also test make_move/unmake_move
+                    probe.make_move(12, 28, Piece::WhitePawn);
+                    let _score2 = probe.evaluate(Color::Black);
+                    probe.unmake_move(12, 28, Piece::WhitePawn, None);
+                }
+
+                true // Success
+            });
+
+            handles.push(handle);
+        }
+
+        // Join all threads - if there were data races, this might panic or hang
+        let results: Vec<bool> = handles
+            .into_iter()
+            .map(|h| h.join().expect("Thread panicked"))
+            .collect();
+
+        let all_success = results.iter().all(|&r| r);
+        println!(
+            "All {} threads completed successfully: {}",
+            num_threads, all_success
+        );
+        assert!(all_success, "All threads should complete without errors");
+        println!("Thread safety test PASSED");
+    }
+}
