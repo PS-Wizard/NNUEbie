@@ -28,8 +28,8 @@ pub struct Evaluator {
     pub networks: Arc<NnueNetworks>,
     pub acc_big: Accumulator,
     pub acc_small: Accumulator,
-    scratch_big: Option<ScratchBuffer>,
-    scratch_small: Option<ScratchBuffer>,
+    pub scratch_big: ScratchBuffer,
+    pub scratch_small: ScratchBuffer,
 }
 
 impl Evaluator {
@@ -37,12 +37,15 @@ impl Evaluator {
         let acc_big = Accumulator::new(networks.big_net.feature_transformer.half_dims);
         let acc_small = Accumulator::new(networks.small_net.feature_transformer.half_dims);
 
+        let scratch_big = ScratchBuffer::new(networks.big_net.feature_transformer.half_dims);
+        let scratch_small = ScratchBuffer::new(networks.small_net.feature_transformer.half_dims);
+
         Self {
             networks,
             acc_big,
             acc_small,
-            scratch_big: None,
-            scratch_small: None,
+            scratch_big,
+            scratch_small,
         }
     }
 
@@ -107,16 +110,12 @@ impl Evaluator {
                 &self.networks.small_net.feature_transformer,
             );
 
-            if self.scratch_small.is_none() {
-                let half_dims = self.networks.small_net.feature_transformer.half_dims;
-                self.scratch_small = Some(ScratchBuffer::new(half_dims));
-            }
-            let scratch = self.scratch_small.as_mut().unwrap();
-
-            let (psqt, pos) =
-                self.networks
-                    .small_net
-                    .evaluate(&self.acc_small, bucket, side_to_move, scratch);
+            let (psqt, pos) = self.networks.small_net.evaluate(
+                &self.acc_small,
+                bucket,
+                side_to_move,
+                &mut self.scratch_small,
+            );
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
             positional_val = pos;
@@ -130,17 +129,11 @@ impl Evaluator {
                     &self.networks.big_net.feature_transformer,
                 );
 
-                if self.scratch_big.is_none() {
-                    let half_dims = self.networks.big_net.feature_transformer.half_dims;
-                    self.scratch_big = Some(ScratchBuffer::new(half_dims));
-                }
-                let scratch_big = self.scratch_big.as_mut().unwrap();
-
                 let (psqt_b, pos_b) = self.networks.big_net.evaluate(
                     &self.acc_big,
                     bucket,
                     side_to_move,
-                    scratch_big,
+                    &mut self.scratch_big,
                 );
                 nnue_val = (125 * psqt_b + 131 * pos_b) / 128;
             } else {
@@ -153,16 +146,12 @@ impl Evaluator {
                 &self.networks.big_net.feature_transformer,
             );
 
-            if self.scratch_big.is_none() {
-                let half_dims = self.networks.big_net.feature_transformer.half_dims;
-                self.scratch_big = Some(ScratchBuffer::new(half_dims));
-            }
-            let scratch = self.scratch_big.as_mut().unwrap();
-
-            let (psqt, pos) =
-                self.networks
-                    .big_net
-                    .evaluate(&self.acc_big, bucket, side_to_move, scratch);
+            let (psqt, pos) = self.networks.big_net.evaluate(
+                &self.acc_big,
+                bucket,
+                side_to_move,
+                &mut self.scratch_big,
+            );
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
             positional_val = pos;

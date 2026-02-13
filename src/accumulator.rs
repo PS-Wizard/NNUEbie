@@ -4,19 +4,44 @@ use crate::features::{self, make_index};
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+type FeatureUpdateFn = unsafe fn(&mut [i16], &[i16]);
+
 #[derive(Clone)]
 pub struct Accumulator {
     pub accumulation: [Vec<i16>; 2],
     pub psqt_accumulation: [Vec<i32>; 2], // Size 8
     pub computed: [bool; 2],
+    add_feature_fn: FeatureUpdateFn,
+    remove_feature_fn: FeatureUpdateFn,
 }
 
 impl Accumulator {
     pub fn new(size: usize) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        let (add_fn, remove_fn) = if is_x86_feature_detected!("avx2") {
+            (
+                add_feature_avx2 as FeatureUpdateFn,
+                remove_feature_avx2 as FeatureUpdateFn,
+            )
+        } else {
+            (
+                add_feature_scalar as FeatureUpdateFn,
+                remove_feature_scalar as FeatureUpdateFn,
+            )
+        };
+
+        #[cfg(not(target_arch = "x86_64"))]
+        let (add_fn, remove_fn) = (
+            add_feature_scalar as FeatureUpdateFn,
+            remove_feature_scalar as FeatureUpdateFn,
+        );
+
         Self {
             accumulation: [vec![0; size], vec![0; size]],
             psqt_accumulation: [vec![0; 8], vec![0; 8]],
             computed: [false, false],
+            add_feature_fn: add_fn,
+            remove_feature_fn: remove_fn,
         }
     }
 
@@ -86,34 +111,9 @@ impl Accumulator {
         let offset = feature_idx * half_dims;
         let w_slice = &ft.weights[offset..offset + half_dims];
 
-        // Vectorized update
-        #[cfg(target_arch = "x86_64")]
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                let mut i = 0;
-                let acc_ptr = self.accumulation[perspective].as_mut_ptr();
-                let w_ptr = w_slice.as_ptr();
-                let count = half_dims;
-
-                // Process 16 elements at a time
-                for _ in 0..(count / 16) {
-                    let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-                    let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
-                    let res = _mm256_sub_epi16(a, w);
-                    _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
-                    i += 16;
-                }
-
-                // Handle remainder
-                for j in i..count {
-                    *acc_ptr.add(j) -= *w_ptr.add(j) as i16;
-                }
-            }
-        } else {
-            // Scalar fallback
-            for (i, &w) in w_slice.iter().enumerate() {
-                self.accumulation[perspective][i] -= w;
-            }
+        // Use selected implementation
+        unsafe {
+            (self.remove_feature_fn)(self.accumulation[perspective].as_mut_slice(), w_slice);
         }
 
         let psqt_offset = feature_idx * crate::feature_transformer::PSQT_BUCKETS;
@@ -127,43 +127,15 @@ impl Accumulator {
 
     fn add_feature(&mut self, perspective: usize, feature_idx: usize, ft: &FeatureTransformer) {
         let half_dims = ft.half_dims;
-        let _input_dims = ft.input_dims; // Actually padded_input_dims if we followed C++ exactly
         let offset = feature_idx * half_dims;
         let w_slice = &ft.weights[offset..offset + half_dims];
 
-        // Vectorized update
-        #[cfg(target_arch = "x86_64")]
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                let mut i = 0;
-                let acc_ptr = self.accumulation[perspective].as_mut_ptr();
-                let w_ptr = w_slice.as_ptr();
-                let count = half_dims;
-
-                // Process 16 elements at a time
-                for _ in 0..(count / 16) {
-                    let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-                    let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
-                    let res = _mm256_add_epi16(a, w);
-                    _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
-                    i += 16;
-                }
-
-                // Handle remainder
-                for j in i..count {
-                    *acc_ptr.add(j) += *w_ptr.add(j) as i16;
-                }
-            }
-        } else {
-            // Scalar fallback
-            for (i, &w) in w_slice.iter().enumerate() {
-                self.accumulation[perspective][i] += w;
-            }
+        // Use selected implementation
+        unsafe {
+            (self.add_feature_fn)(self.accumulation[perspective].as_mut_slice(), w_slice);
         }
 
         // PSQT update
-        // psqt_weights: [Input][Buckets]
-        // psqtWeights size `InputDimensions * PSQTBuckets`.
         let psqt_offset = feature_idx * crate::feature_transformer::PSQT_BUCKETS;
         let psqt_slice =
             &ft.psqt_weights[psqt_offset..psqt_offset + crate::feature_transformer::PSQT_BUCKETS];
@@ -171,6 +143,68 @@ impl Accumulator {
         for (i, &pw) in psqt_slice.iter().enumerate() {
             self.psqt_accumulation[perspective][i] += pw;
         }
+    }
+}
+
+// SIMD Implementations
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn add_feature_avx2(acc: &mut [i16], weights: &[i16]) {
+    let mut i = 0;
+    let acc_ptr = acc.as_mut_ptr();
+    let w_ptr = weights.as_ptr();
+    let count = acc.len();
+
+    // Process 16 elements at a time
+    for _ in 0..(count / 16) {
+        let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
+        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+        let res = _mm256_add_epi16(a, w);
+        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
+        i += 16;
+    }
+
+    // Handle remainder
+    for j in i..count {
+        *acc_ptr.add(j) += *w_ptr.add(j) as i16;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn remove_feature_avx2(acc: &mut [i16], weights: &[i16]) {
+    let mut i = 0;
+    let acc_ptr = acc.as_mut_ptr();
+    let w_ptr = weights.as_ptr();
+    let count = acc.len();
+
+    // Process 16 elements at a time
+    for _ in 0..(count / 16) {
+        let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
+        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+        let res = _mm256_sub_epi16(a, w);
+        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
+        i += 16;
+    }
+
+    // Handle remainder
+    for j in i..count {
+        *acc_ptr.add(j) -= *w_ptr.add(j) as i16;
+    }
+}
+
+// Scalar Fallbacks
+
+unsafe fn add_feature_scalar(acc: &mut [i16], weights: &[i16]) {
+    for (a, w) in acc.iter_mut().zip(weights.iter()) {
+        *a += *w;
+    }
+}
+
+unsafe fn remove_feature_scalar(acc: &mut [i16], weights: &[i16]) {
+    for (a, w) in acc.iter_mut().zip(weights.iter()) {
+        *a -= *w;
     }
 }
 

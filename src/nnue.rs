@@ -1,7 +1,6 @@
 use crate::evaluator::{
     Evaluator, NnueNetworks, BISHOP_VALUE, KNIGHT_VALUE, PAWN_VALUE, QUEEN_VALUE, ROOK_VALUE,
 };
-use crate::network::ScratchBuffer;
 use crate::types::{Color, Piece, Square};
 use std::io;
 use std::sync::Arc;
@@ -13,8 +12,6 @@ pub struct NNUEProbe {
     piece_count: usize,
     pawn_count: [i32; 2],
     non_pawn_material: [i32; 2],
-    scratch_big: Option<ScratchBuffer>,
-    scratch_small: Option<ScratchBuffer>,
 }
 
 impl NNUEProbe {
@@ -32,8 +29,6 @@ impl NNUEProbe {
             piece_count: 0,
             pawn_count: [0; 2],
             non_pawn_material: [0; 2],
-            scratch_big: None,
-            scratch_small: None,
         })
     }
 
@@ -137,24 +132,39 @@ impl NNUEProbe {
         } else {
             // Incremental update
             // Map pieces to (Square, PieceIndex)
-            // Allocating Vecs for now - Phase 3 will optimize
-            let removed_mapped: Vec<(usize, usize)> =
-                removed.iter().map(|&(p, s)| (s, p.index())).collect();
-            let added_mapped: Vec<(usize, usize)> =
-                added.iter().map(|&(p, s)| (s, p.index())).collect();
+            // Use stack allocation to avoid Vec overhead
+            const MAX_CHANGES: usize = 32;
+            let mut removed_mapped = [(0, 0); MAX_CHANGES];
+            let mut removed_len = 0;
+
+            for &(p, s) in removed {
+                removed_mapped[removed_len] = (s, p.index());
+                removed_len += 1;
+            }
+
+            let mut added_mapped = [(0, 0); MAX_CHANGES];
+            let mut added_len = 0;
+
+            for &(p, s) in added {
+                added_mapped[added_len] = (s, p.index());
+                added_len += 1;
+            }
+
+            let removed_slice = &removed_mapped[..removed_len];
+            let added_slice = &added_mapped[..added_len];
 
             let ft_big = &self.evaluator.networks.big_net.feature_transformer;
             self.evaluator.acc_big.update_with_ksq(
-                &added_mapped,
-                &removed_mapped,
+                added_slice,
+                removed_slice,
                 self.king_squares,
                 ft_big,
             );
 
             let ft_small = &self.evaluator.networks.small_net.feature_transformer;
             self.evaluator.acc_small.update_with_ksq(
-                &added_mapped,
-                &removed_mapped,
+                added_slice,
+                removed_slice,
                 self.king_squares,
                 ft_small,
             );
@@ -201,21 +211,11 @@ impl NNUEProbe {
         let mut positional_val;
 
         if use_small {
-            if self.scratch_small.is_none() {
-                let half_dims = self
-                    .evaluator
-                    .networks
-                    .small_net
-                    .feature_transformer
-                    .half_dims;
-                self.scratch_small = Some(ScratchBuffer::new(half_dims));
-            }
-            let scratch = self.scratch_small.as_mut().unwrap();
             let (psqt, pos) = self.evaluator.networks.small_net.evaluate(
                 &self.evaluator.acc_small,
                 bucket,
                 stm,
-                scratch,
+                &mut self.evaluator.scratch_small,
             );
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
@@ -223,42 +223,22 @@ impl NNUEProbe {
 
             if nnue_val.abs() < 236 {
                 // Use big
-                if self.scratch_big.is_none() {
-                    let half_dims = self
-                        .evaluator
-                        .networks
-                        .big_net
-                        .feature_transformer
-                        .half_dims;
-                    self.scratch_big = Some(ScratchBuffer::new(half_dims));
-                }
-                let scratch_big = self.scratch_big.as_mut().unwrap();
                 let (psqt_b, pos_b) = self.evaluator.networks.big_net.evaluate(
                     &self.evaluator.acc_big,
                     bucket,
                     stm,
-                    scratch_big,
+                    &mut self.evaluator.scratch_big,
                 );
                 nnue_val = (125 * psqt_b + 131 * pos_b) / 128;
                 psqt_val = psqt_b;
                 positional_val = pos_b;
             }
         } else {
-            if self.scratch_big.is_none() {
-                let half_dims = self
-                    .evaluator
-                    .networks
-                    .big_net
-                    .feature_transformer
-                    .half_dims;
-                self.scratch_big = Some(ScratchBuffer::new(half_dims));
-            }
-            let scratch = self.scratch_big.as_mut().unwrap();
             let (psqt, pos) = self.evaluator.networks.big_net.evaluate(
                 &self.evaluator.acc_big,
                 bucket,
                 stm,
-                scratch,
+                &mut self.evaluator.scratch_big,
             );
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
