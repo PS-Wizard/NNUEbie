@@ -174,6 +174,7 @@ Stockfish uses `_mm_prefetch` for cache optimization in hot paths. nnuebie doesn
 2. Apply `PackusEpi16Order` pattern at load time
 3. Update `transform_features` to work with permuted weights
 
+Note that this needs - Implement both permute at load time + update transform to use packus properly. 
 **Files to modify**:
 - `src/feature_transformer.rs` - Add permutation
 - `src/network.rs` - Update transform function if needed

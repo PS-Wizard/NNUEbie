@@ -197,7 +197,7 @@ impl AccumulatorStack {
 
         let current = self.mut_latest();
 
-        // Copy accumulator data from source if we found one
+        // Copy accumulator data from source if we found one, otherwise initialize with biases
         if let Some((ab0, ab1, ab_psqt, as0, as1, as_psqt)) = source_accum {
             current.acc_big.accumulation[0].copy_from_slice(&ab0);
             current.acc_big.accumulation[1].copy_from_slice(&ab1);
@@ -208,6 +208,14 @@ impl AccumulatorStack {
                 .acc_small
                 .psqt_accumulation
                 .copy_from_slice(&as_psqt);
+        } else {
+            // Initialize with biases (full refresh case)
+            current.acc_big.accumulation[0].copy_from_slice(&*ft_big.biases);
+            current.acc_big.accumulation[1].copy_from_slice(&*ft_big.biases);
+            current.acc_big.psqt_accumulation.fill([0; 8]);
+            current.acc_small.accumulation[0].copy_from_slice(&*ft_small.biases);
+            current.acc_small.accumulation[1].copy_from_slice(&*ft_small.biases);
+            current.acc_small.psqt_accumulation.fill([0; 8]);
         }
 
         // Build change lists from dirty_piece
