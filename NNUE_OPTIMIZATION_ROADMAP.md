@@ -87,7 +87,7 @@ vec_add_dpbusd_32(acc[k], in0, col0[k]);  // _mm256_dpbusd_epi32
 
 ### 3. Feature Transformer Multiplication Not Optimized
 
-**Problem**: Stockfish uses `mulhi` for faster multiplication.
+**Problem**: Stockfish uses `mulhi` for faster multiplication. -- DONE
 
 **Stockfish Approach** (`nnue_feature_transformer.h:427-446`):
 ```cpp

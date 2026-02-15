@@ -209,11 +209,13 @@ impl Network {
                 let v0_c = _mm256_max_epi16(max, _mm256_min_epi16(min, v0));
                 let v1_c = _mm256_max_epi16(max, _mm256_min_epi16(min, v1));
 
-                let prod = _mm256_mullo_epi16(v0_c, v1_c);
-                let res = _mm256_srli_epi16(prod, 9);
+                // Stockfish optimization: shift first operand left by 7, then mulhi
+                // This gives: (v0_c << 7) * v1_c >> 16 = v0_c * v1_c / 512
+                let v0_s = _mm256_slli_epi16(v0_c, 7);
+                let prod = _mm256_mulhi_epi16(v0_s, v1_c);
 
-                let lo = _mm256_castsi256_si128(res);
-                let hi = _mm256_extracti128_si256(res, 1);
+                let lo = _mm256_castsi256_si128(prod);
+                let hi = _mm256_extracti128_si256(prod, 1);
 
                 let packed = _mm_packus_epi16(lo, hi);
 
