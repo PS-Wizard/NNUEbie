@@ -6,7 +6,7 @@ This document outlines the performance optimization phases for the nnuebie Rust 
 
 ## Current Status
 
-- **Phase 1.1**: Memory Alignment - Pending 
+- **Phase 1.1**: Memory Alignment - DONE
 - **Phase 1.2**: Finny Tables (AccumulatorCaches) - Pending
 - **Phase 1.3**: Weight Permutation - Pending
 - **Phase 1.4**: Accumulator Deep Copy Fix - Pending

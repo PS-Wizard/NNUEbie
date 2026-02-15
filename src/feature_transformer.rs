@@ -1,3 +1,4 @@
+use crate::aligned::AlignedBuffer;
 use crate::loader::{read_leb128_i16, read_leb128_i16_checked, read_leb128_i32};
 use std::io::{self, Read};
 
@@ -6,9 +7,9 @@ pub const PSQT_BUCKETS: usize = 8;
 pub struct FeatureTransformer {
     pub input_dims: usize,
     pub half_dims: usize,
-    pub biases: Vec<i16>,
-    pub weights: Vec<i16>,
-    pub psqt_weights: Vec<i32>,
+    pub biases: AlignedBuffer<i16>,
+    pub weights: AlignedBuffer<i16>,
+    pub psqt_weights: AlignedBuffer<i32>,
 }
 
 impl FeatureTransformer {
@@ -16,9 +17,9 @@ impl FeatureTransformer {
         Self {
             input_dims,
             half_dims,
-            biases: vec![],
-            weights: vec![],
-            psqt_weights: vec![],
+            biases: AlignedBuffer::new(0),
+            weights: AlignedBuffer::new(0),
+            psqt_weights: AlignedBuffer::new(0),
         }
     }
 
@@ -27,25 +28,22 @@ impl FeatureTransformer {
         reader: &mut R,
         skip_first_magic: bool,
     ) -> io::Result<()> {
-        let biases = read_leb128_i16_checked(reader, self.half_dims, !skip_first_magic)?;
-        let weights = read_leb128_i16(reader, self.half_dims * self.input_dims)?;
-        let psqt_weights = read_leb128_i32(reader, PSQT_BUCKETS * self.input_dims)?;
-
-        self.biases = biases;
-        self.weights = weights;
-        self.psqt_weights = psqt_weights;
+        let mut biases_vec = read_leb128_i16_checked(reader, self.half_dims, !skip_first_magic)?;
+        let mut weights_vec = read_leb128_i16(reader, self.half_dims * self.input_dims)?;
+        let psqt_weights_vec = read_leb128_i32(reader, PSQT_BUCKETS * self.input_dims)?;
 
         // Scale weights and biases by 2 (as per C++ read_parameters)
-        // No permutation needed if we stick to scalar logic, assuming file is in standard order.
-        // C++ code: permute_weights(); scale_weights(true);
-        // scale_weights(true) multiplies by 2.
-
-        for b in &mut self.biases {
+        for b in &mut biases_vec {
             *b = b.wrapping_mul(2);
         }
-        for w in &mut self.weights {
+        for w in &mut weights_vec {
             *w = w.wrapping_mul(2);
         }
+
+        // Convert to AlignedBuffer
+        self.biases = AlignedBuffer::from_vec(biases_vec);
+        self.weights = AlignedBuffer::from_vec(weights_vec);
+        self.psqt_weights = AlignedBuffer::from_vec(psqt_weights_vec);
 
         Ok(())
     }

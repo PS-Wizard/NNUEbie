@@ -1,5 +1,6 @@
 pub mod accumulator;
 pub mod accumulator_stack;
+pub mod aligned;
 pub mod evaluator;
 pub mod feature_transformer;
 pub mod features;

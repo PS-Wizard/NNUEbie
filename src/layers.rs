@@ -1,3 +1,4 @@
+use crate::aligned::AlignedBuffer;
 use crate::loader::{read_i32_array, read_i8_array};
 use std::io::{self, Read};
 
@@ -22,8 +23,8 @@ unsafe fn hsum_256(x: __m256i) -> i32 {
 }
 
 pub struct AffineTransform {
-    pub biases: Vec<i32>,
-    pub weights: Vec<i8>,
+    pub biases: AlignedBuffer<i32>,
+    pub weights: AlignedBuffer<i8>,
     pub input_dims: usize,
     pub output_dims: usize,
     pub padded_input_dims: usize,
@@ -33,8 +34,8 @@ impl AffineTransform {
     pub fn new(input_dims: usize, output_dims: usize) -> Self {
         let padded_input_dims = (input_dims + 31) / 32 * 32;
         Self {
-            biases: vec![0; output_dims],
-            weights: vec![0; output_dims * padded_input_dims],
+            biases: AlignedBuffer::new(output_dims),
+            weights: AlignedBuffer::new(output_dims * padded_input_dims),
             input_dims,
             output_dims,
             padded_input_dims,
@@ -62,12 +63,13 @@ impl AffineTransform {
 
                 for c in 0..num_chunks {
                     let in_ptr = input.as_ptr().add(c * 32);
-                    let input_vec = _mm256_loadu_si256(in_ptr as *const _);
+                    // Input is from AlignedBuffer - use aligned load
+                    let input_vec = _mm256_load_si256(in_ptr as *const _);
 
-                    let w0 = _mm256_loadu_si256(w_ptr0.add(c * 32) as *const _);
-                    let w1 = _mm256_loadu_si256(w_ptr1.add(c * 32) as *const _);
-                    let w2 = _mm256_loadu_si256(w_ptr2.add(c * 32) as *const _);
-                    let w3 = _mm256_loadu_si256(w_ptr3.add(c * 32) as *const _);
+                    let w0 = _mm256_load_si256(w_ptr0.add(c * 32) as *const _);
+                    let w1 = _mm256_load_si256(w_ptr1.add(c * 32) as *const _);
+                    let w2 = _mm256_load_si256(w_ptr2.add(c * 32) as *const _);
+                    let w3 = _mm256_load_si256(w_ptr3.add(c * 32) as *const _);
 
                     // maddubs: input unsigned, weight signed
                     let p0 = _mm256_maddubs_epi16(input_vec, w0);
@@ -99,8 +101,8 @@ impl AffineTransform {
 
                     for c in 0..num_chunks {
                         let in_ptr = input.as_ptr().add(c * 32);
-                        let input_vec = _mm256_loadu_si256(in_ptr as *const _);
-                        let w = _mm256_loadu_si256(w_ptr.add(c * 32) as *const _);
+                        let input_vec = _mm256_load_si256(in_ptr as *const _);
+                        let w = _mm256_load_si256(w_ptr.add(c * 32) as *const _);
                         let p = _mm256_maddubs_epi16(input_vec, w);
                         let s = _mm256_madd_epi16(p, ones);
                         acc = _mm256_add_epi32(acc, s);
@@ -155,10 +157,11 @@ impl Layer for AffineTransform {
     }
 
     fn read_parameters<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
-        let biases = read_i32_array(reader, self.output_dims)?;
-        self.biases = biases;
+        let biases_vec = read_i32_array(reader, self.output_dims)?;
+        self.biases = AlignedBuffer::from_vec(biases_vec);
+
         let weights_raw = read_i8_array(reader, self.output_dims * self.padded_input_dims)?;
-        self.weights = weights_raw;
+        self.weights = AlignedBuffer::from_vec(weights_raw);
         Ok(())
     }
 }
@@ -179,7 +182,7 @@ impl ClippedReLU {
     unsafe fn propagate_avx2(&self, input: &[i32], output: &mut [u8]) {
         let n = self.dims / 8 * 8;
         for i in (0..n).step_by(8) {
-            let vec = _mm256_loadu_si256(input.as_ptr().add(i) as *const _);
+            let vec = _mm256_load_si256(input.as_ptr().add(i) as *const _);
             let scaled = _mm256_srai_epi32(vec, 6);
 
             let lo = _mm256_castsi256_si128(scaled);
@@ -248,7 +251,7 @@ impl SqrClippedReLU {
     unsafe fn propagate_avx2(&self, input: &[i32], output: &mut [u8]) {
         let n = self.dims / 8 * 8;
         for i in (0..n).step_by(8) {
-            let vec = _mm256_loadu_si256(input.as_ptr().add(i) as *const _);
+            let vec = _mm256_load_si256(input.as_ptr().add(i) as *const _);
 
             let even_sq = _mm256_mul_epi32(vec, vec);
             let even_res = _mm256_srai_epi64(even_sq, 19);

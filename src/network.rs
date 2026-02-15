@@ -1,4 +1,5 @@
 use crate::accumulator::Accumulator;
+use crate::aligned::AlignedBuffer;
 use crate::feature_transformer::FeatureTransformer;
 use crate::layers::{AffineTransform, ClippedReLU, Layer, SqrClippedReLU};
 use crate::{OUTPUT_SCALE, WEIGHT_SCALE_BITS};
@@ -22,25 +23,25 @@ pub struct Network {
 }
 
 pub struct ScratchBuffer {
-    pub transformed_features: Vec<u8>,
-    pub fc_0_out: Vec<i32>,
-    pub ac_0_out: Vec<u8>, // Reused for ac_sqr_0 as well
-    pub fc_1_in: Vec<u8>,
-    pub fc_1_out: Vec<i32>,
-    pub ac_1_out: Vec<u8>,
-    pub fc_2_out: Vec<i32>,
+    pub transformed_features: AlignedBuffer<u8>,
+    pub fc_0_out: AlignedBuffer<i32>,
+    pub ac_0_out: AlignedBuffer<u8>,
+    pub fc_1_in: AlignedBuffer<u8>,
+    pub fc_1_out: AlignedBuffer<i32>,
+    pub ac_1_out: AlignedBuffer<u8>,
+    pub fc_2_out: AlignedBuffer<i32>,
 }
 
 impl ScratchBuffer {
     pub fn new(half_dims: usize) -> Self {
         Self {
-            transformed_features: vec![0u8; half_dims],
-            fc_0_out: vec![0i32; 16], // L2 + 1
-            ac_0_out: vec![0u8; 16],  // L2 + 1
-            fc_1_in: vec![0u8; 30],   // L2 * 2
-            fc_1_out: vec![0i32; 32], // L3
-            ac_1_out: vec![0u8; 32],  // L3
-            fc_2_out: vec![0i32; 1],  // 1
+            transformed_features: AlignedBuffer::new(half_dims),
+            fc_0_out: AlignedBuffer::new(16), // L2 + 1
+            ac_0_out: AlignedBuffer::new(16), // L2 + 1
+            fc_1_in: AlignedBuffer::new(30),  // L2 * 2
+            fc_1_out: AlignedBuffer::new(32), // L3
+            ac_1_out: AlignedBuffer::new(32), // L3
+            fc_2_out: AlignedBuffer::new(1),  // 1
         }
     }
 }
@@ -52,7 +53,6 @@ impl Network {
 
         // Read Header
         let version = crate::loader::read_little_endian_u32(&mut reader)?;
-        // println!("Version: {:x}", version);
         if version != crate::VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -64,20 +64,16 @@ impl Network {
             ));
         }
         let _hash = crate::loader::read_little_endian_u32(&mut reader)?;
-        // println!("Network Hash: {:x}", _hash);
 
         let desc_len = crate::loader::read_little_endian_u32(&mut reader)? as usize;
-        // println!("Desc Len: {}", desc_len);
 
         let mut desc = vec![0u8; desc_len];
         reader.read_exact(&mut desc)?;
-        // println!("Desc: {:?}", String::from_utf8_lossy(&desc));
 
         // Feature Transformer
         let _hash_ft = crate::loader::read_little_endian_u32(&mut reader)?;
-        // println!("FT Hash: {:x}", _hash_ft);
 
-        // Peek/Consume Magic String (FeatureTransformer bias read doesn't expect it)
+        // Peek/Consume Magic String
         let mut check = [0u8; 17];
         reader.read_exact(&mut check)?;
         if &check != b"COMPRESSED_LEB128" {
@@ -99,7 +95,7 @@ impl Network {
         };
 
         let mut ft = FeatureTransformer::new(input_dims, half_dims);
-        ft.read_parameters(&mut reader, true)?; // Skip first magic
+        ft.read_parameters(&mut reader, true)?;
 
         // Layers
         let mut fc_0s = Vec::with_capacity(LAYER_STACKS);
@@ -110,24 +106,14 @@ impl Network {
             let _hash_stack = crate::loader::read_little_endian_u32(&mut reader)?;
 
             // fc_0
-            let _fc_0 = AffineTransform::new(half_dims, l2);
-            // fc_0 output is l2 + 1 (16) to include residual scaling factor
             let mut fc_0_layer = AffineTransform::new(half_dims, l2 + 1);
             fc_0_layer.read_parameters(&mut reader)?;
 
-            // ac_sqr_0 (no params)
-            // ac_0 (no params)
-
             // fc_1
-            // fc_1 input is 30 (FC_0_OUTPUTS * 2), output is 32 (l3)
             let mut fc_1_layer = AffineTransform::new(l2 * 2, l3);
             fc_1_layer.read_parameters(&mut reader)?;
 
-            // ac_1 (no params)
-
             // fc_2
-            // Layers::AffineTransform<FC_1_OUTPUTS, 1>
-            // Input 32, Output 1.
             let mut fc_2_layer = AffineTransform::new(l3, 1);
             fc_2_layer.read_parameters(&mut reader)?;
 
@@ -142,13 +128,6 @@ impl Network {
             fc_1: fc_1s,
             fc_2: fc_2s,
             ac_sqr_0: SqrClippedReLU::new(l2 + 1),
-            // Architecture:
-            // ac_sqr_0.propagate(buffer.fc_0_out, buffer.ac_sqr_0_out);
-            // ac_0.propagate(buffer.fc_0_out, buffer.ac_0_out);
-            // Input to both is fc_0 output (size 16).
-            // But ac_sqr_0 is defined as <FC_0_OUTPUTS + 1>.
-            // ac_0 is defined as <FC_0_OUTPUTS + 1>.
-            // So both process 16 elements.
             ac_0: ClippedReLU::new(l2 + 1),
             ac_1: ClippedReLU::new(l3),
             is_big,
@@ -168,7 +147,7 @@ impl Network {
             return self.transform_features_avx2(accumulator, scratch, us, them);
         }
 
-        // Runtime detection path (when no compile-time feature set)
+        // Runtime detection path
         #[cfg(all(
             target_arch = "x86_64",
             not(feature = "simd_avx2"),
@@ -220,8 +199,9 @@ impl Network {
             let n = (half_dims / 2) / chunk_size * chunk_size;
 
             for j in (0..n).step_by(chunk_size) {
-                let v0 = _mm256_loadu_si256(acc_ptr.add(j) as *const _);
-                let v1 = _mm256_loadu_si256(acc_ptr.add(j + half_dims / 2) as *const _);
+                // Aligned loads from accumulator (AlignedBuffer)
+                let v0 = _mm256_load_si256(acc_ptr.add(j) as *const _);
+                let v1 = _mm256_load_si256(acc_ptr.add(j + half_dims / 2) as *const _);
 
                 let min = _mm256_set1_epi16(254);
                 let max = _mm256_setzero_si256();
@@ -237,7 +217,8 @@ impl Network {
 
                 let packed = _mm_packus_epi16(lo, hi);
 
-                _mm_storeu_si128(output_ptr.add(offset + j) as *mut _, packed);
+                // Aligned store to output (AlignedBuffer)
+                _mm_store_si128(output_ptr.add(offset + j) as *mut _, packed);
             }
 
             for j in n..(half_dims / 2) {
@@ -256,16 +237,6 @@ impl Network {
         side_to_move: usize,
         scratch: &mut ScratchBuffer,
     ) -> (i32, i32) {
-        // 1. Transform Feature (Acc -> Output)
-        // FeatureTransformer transform logic in C++:
-        /*
-          accumulatorStack.evaluate(pos, *this, *cache);
-          ...
-          psqt = (psqtAcc[us][bucket] - psqtAcc[them][bucket]) / 2;
-          ...
-          transform acc -> output
-        */
-
         let us = side_to_move;
         let them = 1 - us;
 
@@ -275,10 +246,6 @@ impl Network {
 
         self.transform_features(accumulator, scratch, us, them);
 
-        // 2. Propagate MLP
-        let _l2 = 15;
-        // let l3 = 32;
-
         let fc_0 = &self.fc_0[bucket];
         let fc_1 = &self.fc_1[bucket];
         let fc_2 = &self.fc_2[bucket];
@@ -287,26 +254,8 @@ impl Network {
 
         self.ac_sqr_0
             .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
-        self.ac_0
-            .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
 
-        // Concatenate for fc_1 input: [ac_sqr_0(0..15), ac_0(0..15)]
-        // Overlap: ac_0[0] overwrites ac_sqr_0[15].
-        // fc_1 input size 30: reads [0..29] effectively skipping the residual indices.
-        // Copy first 15 from ac_sqr_0 (reuse ac_0_out buffer for first 15, but ac_0_out IS ac_0_out. Wait.)
-        // ac_0_out now contains ac_0 output.
-        // We need ac_sqr_0 output AND ac_0 output.
-        // My scratch buffer only has one `ac_0_out`.
-        // So I need to run ac_sqr_0 first, copy it, then run ac_0.
-
-        // Strategy:
-        // 1. Run ac_sqr_0 -> scratch.ac_0_out
-        // 2. Copy scratch.ac_0_out[0..15] to scratch.fc_1_in[0..15]
-        // 3. Run ac_0 -> scratch.ac_0_out (overwrites)
-        // 4. Copy scratch.ac_0_out[0..15] to scratch.fc_1_in[15..30]
-
-        self.ac_sqr_0
-            .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
+        // Copy for fc_1 input
         scratch.fc_1_in[0..15].copy_from_slice(&scratch.ac_0_out[0..15]);
 
         self.ac_0
@@ -326,7 +275,6 @@ impl Network {
 
         let positional = scratch.fc_2_out[0] + fwd_out;
 
-        // Result scaled by OutputScale
         (psqt / OUTPUT_SCALE, positional / OUTPUT_SCALE)
     }
 }

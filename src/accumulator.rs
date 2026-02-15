@@ -1,3 +1,4 @@
+use crate::aligned::AlignedBuffer;
 use crate::feature_transformer::FeatureTransformer;
 use crate::features::{self, make_index};
 
@@ -9,7 +10,7 @@ type FeatureUpdateFn = unsafe fn(&mut [i16], &[i16]);
 #[derive(Clone)]
 pub struct Accumulator<const SIZE: usize> {
     // Use heap-allocated aligned memory
-    pub accumulation: [Box<[i16; SIZE]>; 2],
+    pub accumulation: [AlignedBuffer<i16>; 2],
     pub psqt_accumulation: [[i32; 8]; 2],
     computed: [bool; 2],
     add_feature_fn: FeatureUpdateFn,
@@ -44,8 +45,8 @@ impl<const SIZE: usize> Accumulator<SIZE> {
         );
 
         // Allocate aligned memory on heap
-        let acc0 = Box::new([0i16; SIZE]);
-        let acc1 = Box::new([0i16; SIZE]);
+        let acc0 = AlignedBuffer::<i16>::new(SIZE);
+        let acc1 = AlignedBuffer::<i16>::new(SIZE);
 
         Self {
             accumulation: [acc0, acc1],
@@ -238,37 +239,43 @@ unsafe fn add_feature_avx2(acc: &mut [i16], weights: &[i16]) {
     let count = acc.len();
 
     // Unroll by 4 (64 elements per iteration)
-    // Use unaligned loads for safety - Box doesn't guarantee alignment
-    while i + 64 <= count {
-        let w0 = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-        let w1 = _mm256_loadu_si256(w_ptr.add(i + 16) as *const _);
-        let w2 = _mm256_loadu_si256(w_ptr.add(i + 32) as *const _);
-        let w3 = _mm256_loadu_si256(w_ptr.add(i + 48) as *const _);
+    // acc is AlignedBuffer, so aligned.
+    // weights is from FeatureTransformer. If we align FT weights and stride is multiple of 32 (64 bytes), we can use aligned.
+    // half_dims is 3072 or 128. 3072 * 2 = 6144 bytes (multiple of 64). 128 * 2 = 256 bytes (multiple of 64).
+    // So weights slice start is aligned if weights buffer is aligned.
 
-        let a0 = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
-        let a1 = _mm256_loadu_si256(acc_ptr.add(i + 16) as *const _);
-        let a2 = _mm256_loadu_si256(acc_ptr.add(i + 32) as *const _);
-        let a3 = _mm256_loadu_si256(acc_ptr.add(i + 48) as *const _);
+    // We will ensure FeatureTransformer uses AlignedBuffer.
+
+    while i + 64 <= count {
+        let w0 = _mm256_load_si256(w_ptr.add(i) as *const _);
+        let w1 = _mm256_load_si256(w_ptr.add(i + 16) as *const _);
+        let w2 = _mm256_load_si256(w_ptr.add(i + 32) as *const _);
+        let w3 = _mm256_load_si256(w_ptr.add(i + 48) as *const _);
+
+        let a0 = _mm256_load_si256(acc_ptr.add(i) as *const _);
+        let a1 = _mm256_load_si256(acc_ptr.add(i + 16) as *const _);
+        let a2 = _mm256_load_si256(acc_ptr.add(i + 32) as *const _);
+        let a3 = _mm256_load_si256(acc_ptr.add(i + 48) as *const _);
 
         let r0 = _mm256_add_epi16(a0, w0);
         let r1 = _mm256_add_epi16(a1, w1);
         let r2 = _mm256_add_epi16(a2, w2);
         let r3 = _mm256_add_epi16(a3, w3);
 
-        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, r0);
-        _mm256_storeu_si256(acc_ptr.add(i + 16) as *mut _, r1);
-        _mm256_storeu_si256(acc_ptr.add(i + 32) as *mut _, r2);
-        _mm256_storeu_si256(acc_ptr.add(i + 48) as *mut _, r3);
+        _mm256_store_si256(acc_ptr.add(i) as *mut _, r0);
+        _mm256_store_si256(acc_ptr.add(i + 16) as *mut _, r1);
+        _mm256_store_si256(acc_ptr.add(i + 32) as *mut _, r2);
+        _mm256_store_si256(acc_ptr.add(i + 48) as *mut _, r3);
 
         i += 64;
     }
 
     // Remainder loop (if size not multiple of 64)
     while i + 16 <= count {
-        let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+        let w = _mm256_load_si256(w_ptr.add(i) as *const _);
+        let a = _mm256_load_si256(acc_ptr.add(i) as *const _);
         let res = _mm256_add_epi16(a, w);
-        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
+        _mm256_store_si256(acc_ptr.add(i) as *mut _, res);
         i += 16;
     }
 
@@ -287,34 +294,34 @@ unsafe fn remove_feature_avx2(acc: &mut [i16], weights: &[i16]) {
     let count = acc.len();
 
     while i + 64 <= count {
-        let w0 = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-        let w1 = _mm256_loadu_si256(w_ptr.add(i + 16) as *const _);
-        let w2 = _mm256_loadu_si256(w_ptr.add(i + 32) as *const _);
-        let w3 = _mm256_loadu_si256(w_ptr.add(i + 48) as *const _);
+        let w0 = _mm256_load_si256(w_ptr.add(i) as *const _);
+        let w1 = _mm256_load_si256(w_ptr.add(i + 16) as *const _);
+        let w2 = _mm256_load_si256(w_ptr.add(i + 32) as *const _);
+        let w3 = _mm256_load_si256(w_ptr.add(i + 48) as *const _);
 
-        let a0 = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
-        let a1 = _mm256_loadu_si256(acc_ptr.add(i + 16) as *const _);
-        let a2 = _mm256_loadu_si256(acc_ptr.add(i + 32) as *const _);
-        let a3 = _mm256_loadu_si256(acc_ptr.add(i + 48) as *const _);
+        let a0 = _mm256_load_si256(acc_ptr.add(i) as *const _);
+        let a1 = _mm256_load_si256(acc_ptr.add(i + 16) as *const _);
+        let a2 = _mm256_load_si256(acc_ptr.add(i + 32) as *const _);
+        let a3 = _mm256_load_si256(acc_ptr.add(i + 48) as *const _);
 
         let r0 = _mm256_sub_epi16(a0, w0);
         let r1 = _mm256_sub_epi16(a1, w1);
         let r2 = _mm256_sub_epi16(a2, w2);
         let r3 = _mm256_sub_epi16(a3, w3);
 
-        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, r0);
-        _mm256_storeu_si256(acc_ptr.add(i + 16) as *mut _, r1);
-        _mm256_storeu_si256(acc_ptr.add(i + 32) as *mut _, r2);
-        _mm256_storeu_si256(acc_ptr.add(i + 48) as *mut _, r3);
+        _mm256_store_si256(acc_ptr.add(i) as *mut _, r0);
+        _mm256_store_si256(acc_ptr.add(i + 16) as *mut _, r1);
+        _mm256_store_si256(acc_ptr.add(i + 32) as *mut _, r2);
+        _mm256_store_si256(acc_ptr.add(i + 48) as *mut _, r3);
 
         i += 64;
     }
 
     while i + 16 <= count {
-        let w = _mm256_loadu_si256(w_ptr.add(i) as *const _);
-        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const _);
+        let w = _mm256_load_si256(w_ptr.add(i) as *const _);
+        let a = _mm256_load_si256(acc_ptr.add(i) as *const _);
         let res = _mm256_sub_epi16(a, w);
-        _mm256_storeu_si256(acc_ptr.add(i) as *mut _, res);
+        _mm256_store_si256(acc_ptr.add(i) as *mut _, res);
         i += 16;
     }
 
