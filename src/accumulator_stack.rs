@@ -120,7 +120,8 @@ impl AccumulatorStack {
     }
 
     /// Push a new position onto the stack (make move)
-    /// This creates a new accumulator state and applies incremental updates
+    /// Stockfish-style: no deep copy of accumulators - just mark as not computed
+    /// This avoids copying ~12KB on every move
     pub fn push(&mut self, dirty_piece: &DirtyPiece) {
         assert!(
             self.current_idx + 1 < self.stack.capacity(),
@@ -132,11 +133,9 @@ impl AccumulatorStack {
             self.stack.push(AccumulatorState::new());
         }
 
-        // Copy current state to next slot
-        let prev_idx = self.current_idx - 1;
-        self.stack[self.current_idx] = self.stack[prev_idx].clone();
-
-        // Reset dirty piece tracking
+        // Stockfish approach: NO copying!
+        // Just mark the state as needing recomputation
+        // The accumulators from previous state will be reused via incremental updates
         self.stack[self.current_idx].reset(dirty_piece);
 
         self.current_idx += 1;
@@ -161,7 +160,55 @@ impl AccumulatorStack {
         ft_big: &FeatureTransformer,
         ft_small: &FeatureTransformer,
     ) {
+        // Find the last state with computed accumulators BEFORE mutably borrowing
+        // This is the Stockfish approach - lazily find the last usable state
+        let current_idx = self.current_idx;
+        let mut last_computed_idx = current_idx - 1;
+        while last_computed_idx > 0 {
+            if self.stack[last_computed_idx].computed == [true, true] {
+                break;
+            }
+            last_computed_idx -= 1;
+        }
+
+        // If we found a computed state, copy its accumulator data to the current state
+        // This is needed because we no longer clone on push()
+        // Note: last_computed_idx can be 0 (root position is valid)
+        let source_accum: Option<(
+            Vec<i16>,
+            Vec<i16>,
+            [[i32; 8]; 2],
+            Vec<i16>,
+            Vec<i16>,
+            [[i32; 8]; 2],
+        )> = if self.stack[last_computed_idx].computed == [true, true] {
+            let source = &self.stack[last_computed_idx];
+            Some((
+                source.acc_big.accumulation[0].as_slice().to_vec(),
+                source.acc_big.accumulation[1].as_slice().to_vec(),
+                source.acc_big.psqt_accumulation,
+                source.acc_small.accumulation[0].as_slice().to_vec(),
+                source.acc_small.accumulation[1].as_slice().to_vec(),
+                source.acc_small.psqt_accumulation,
+            ))
+        } else {
+            None
+        };
+
         let current = self.mut_latest();
+
+        // Copy accumulator data from source if we found one
+        if let Some((ab0, ab1, ab_psqt, as0, as1, as_psqt)) = source_accum {
+            current.acc_big.accumulation[0].copy_from_slice(&ab0);
+            current.acc_big.accumulation[1].copy_from_slice(&ab1);
+            current.acc_big.psqt_accumulation.copy_from_slice(&ab_psqt);
+            current.acc_small.accumulation[0].copy_from_slice(&as0);
+            current.acc_small.accumulation[1].copy_from_slice(&as1);
+            current
+                .acc_small
+                .psqt_accumulation
+                .copy_from_slice(&as_psqt);
+        }
 
         // Build change lists from dirty_piece
         let mut removed: Vec<(usize, usize)> = Vec::with_capacity(3);
