@@ -255,19 +255,11 @@ impl NNUEProbe {
     fn refresh_with_cache(&mut self) {
         // Collect all pieces
         let mut pieces_idx: Vec<(usize, usize)> = Vec::with_capacity(self.piece_count);
-        let mut white_bb: u64 = 0;
-        let mut black_bb: u64 = 0;
 
         for sq in 0..64 {
             let p = self.pieces[sq];
             if p != Piece::None {
                 pieces_idx.push((sq, p.index()));
-                let color = p.index() / 8;
-                if color == 0 {
-                    white_bb |= 1u64 << sq;
-                } else {
-                    black_bb |= 1u64 << sq;
-                }
             }
         }
 

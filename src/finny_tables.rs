@@ -1,61 +1,140 @@
 use crate::accumulator::Accumulator;
+use crate::aligned::AlignedBuffer;
 use crate::feature_transformer::FeatureTransformer;
 
 const PSQT_BUCKETS: usize = 8;
+const MAX_DIFF_PIECES: usize = 4;
 
-/// Cache entry for a specific king square and color (Finny Table entry)
-/// When the king is on this square, we can use this cached accumulator state
-/// and apply incremental updates for pieces that differ.
+#[derive(Clone, Copy)]
+pub struct PieceInfo {
+    square: usize,
+    piece: usize,
+}
+
 pub struct AccumulatorCacheEntry<const SIZE: usize> {
-    /// Cached accumulator values (biases + applied weights) - heap allocated to avoid stack overflow
-    pub accumulation: Box<[i16; SIZE]>,
-    /// Cached PSQT values
+    pub accumulation: AlignedBuffer<i16>,
     pub psqt_accumulation: [i32; PSQT_BUCKETS],
-    /// Bitboard of white pieces (0 if not cached)
-    pub white_pieces: u64,
-    /// Bitboard of black pieces (0 if not cached)
-    pub black_pieces: u64,
-    /// Whether this cache entry is valid
+    pub by_color_bb: [u64; 2],
+    pub by_type_bb: [u64; 6],
     pub valid: bool,
 }
 
 impl<const SIZE: usize> AccumulatorCacheEntry<SIZE> {
     pub fn new() -> Self {
         Self {
-            accumulation: Box::new([0; SIZE]),
+            accumulation: AlignedBuffer::new(SIZE),
             psqt_accumulation: [0; PSQT_BUCKETS],
-            white_pieces: 0,
-            black_pieces: 0,
+            by_color_bb: [0; 2],
+            by_type_bb: [0; 6],
             valid: false,
         }
     }
 
-    /// Initialize entry with just the biases (empty board state)
     pub fn clear(&mut self, biases: &[i16]) {
         self.accumulation.copy_from_slice(biases);
         self.psqt_accumulation.fill(0);
-        self.white_pieces = 0;
-        self.black_pieces = 0;
+        self.by_color_bb.fill(0);
+        self.by_type_bb.fill(0);
         self.valid = true;
     }
 
-    /// Check if this entry can be used for the given position
-    /// Returns the number of pieces that differ (0 means exact match)
-    pub fn can_use(&self, white_pieces: u64, black_pieces: u64) -> Option<usize> {
+    pub fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    pub fn compute_diff(
+        &self,
+        pieces: &[(usize, usize)],
+        _king_sq: usize,
+    ) -> Option<(Vec<PieceInfo>, Vec<PieceInfo>)> {
         if !self.valid {
             return None;
         }
 
-        // Count differing pieces using XOR
-        let white_diff = self.white_pieces ^ white_pieces;
-        let black_diff = self.black_pieces ^ black_pieces;
+        let mut current_color_bb = [0u64; 2];
+        let mut current_type_bb = [0u64; 6];
 
-        // Count bits set (number of differing squares)
-        let diff_count = white_diff.count_ones() + black_diff.count_ones();
+        for &(sq, pc) in pieces {
+            let color = pc / 8;
+            let piece_type = match pc % 8 {
+                1 => 0,
+                2 => 1,
+                3 => 2,
+                4 => 3,
+                5 => 4,
+                6 => 5,
+                _ => continue,
+            };
+            current_color_bb[color] |= 1u64 << sq;
+            current_type_bb[piece_type] |= 1u64 << sq;
+        }
 
-        // If too many differences, it's not worth using the cache
-        // Stockfish typically allows up to 3-4 pieces to differ
-        if diff_count <= 4 {
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+
+        for color in 0..2 {
+            let old_color = self.by_color_bb[color];
+            let new_color = current_color_bb[color];
+            let diff = old_color ^ new_color;
+            let to_remove = old_color & diff;
+            let to_add = new_color & diff;
+
+            for piece_type in 0..6 {
+                let old_type = self.by_type_bb[piece_type];
+                let new_type = current_type_bb[piece_type];
+
+                let pieces_removed = to_remove & old_type;
+                let pieces_added = to_add & new_type;
+
+                let mut bb = pieces_removed;
+                while bb != 0 {
+                    let sq = bb.trailing_zeros() as usize;
+                    removed.push(PieceInfo {
+                        square: sq,
+                        piece: color * 8 + piece_type + 1,
+                    });
+                    bb &= bb - 1;
+                }
+
+                let mut bb = pieces_added;
+                while bb != 0 {
+                    let sq = bb.trailing_zeros() as usize;
+                    added.push(PieceInfo {
+                        square: sq,
+                        piece: color * 8 + piece_type + 1,
+                    });
+                    bb &= bb - 1;
+                }
+            }
+        }
+
+        let diff_count = removed.len() + added.len();
+
+        if diff_count <= MAX_DIFF_PIECES {
+            Some((removed, added))
+        } else {
+            None
+        }
+    }
+
+    pub fn count_diff(&self, pieces: &[(usize, usize)]) -> Option<usize> {
+        if !self.valid {
+            return None;
+        }
+
+        let mut current_color_bb = [0u64; 2];
+
+        for &(sq, pc) in pieces {
+            let color = pc / 8;
+            current_color_bb[color] |= 1u64 << sq;
+        }
+
+        let white_diff = self.by_color_bb[0] ^ current_color_bb[0];
+        let black_diff = self.by_color_bb[1] ^ current_color_bb[1];
+
+        let diff_count = (white_diff.count_ones() + black_diff.count_ones()) as usize;
+
+        if diff_count <= MAX_DIFF_PIECES {
             Some(diff_count as usize)
         } else {
             None
@@ -69,10 +148,7 @@ impl<const SIZE: usize> Default for AccumulatorCacheEntry<SIZE> {
     }
 }
 
-/// Finny Table / Accumulator Cache for one network size
-/// Contains 64 squares × 2 colors = 128 cache entries
 pub struct AccumulatorCache<const SIZE: usize> {
-    /// entries[square][color] - cached state for when king is on that square
     pub entries: [[AccumulatorCacheEntry<SIZE>; 2]; 64],
 }
 
@@ -83,7 +159,6 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
         }
     }
 
-    /// Initialize all entries with biases (called on new game or clear)
     pub fn clear(&mut self, biases: &[i16]) {
         for square_entries in &mut self.entries {
             for entry in square_entries {
@@ -92,52 +167,33 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
         }
     }
 
-    /// Try to refresh accumulator using cache
-    /// Returns true if successful (used cache), false if full refresh needed
     pub fn try_refresh(
         &mut self,
         accumulator: &mut Accumulator<SIZE>,
-        pieces: &[(usize, usize)], // (Square, Piece)
+        pieces: &[(usize, usize)],
         king_squares: [usize; 2],
         ft: &FeatureTransformer,
     ) -> bool {
-        let mut used_cache = [false; 2];
-
         for perspective in 0..2 {
             let king_sq = king_squares[perspective];
             let entry = &mut self.entries[king_sq][perspective];
 
-            // Build bitboards for current position
-            let mut white_bb: u64 = 0;
-            let mut black_bb: u64 = 0;
-
-            for &(sq, pc) in pieces {
-                let color = pc / 8; // 0 = white, 1 = black
-                if color == 0 {
-                    white_bb |= 1u64 << sq;
-                } else {
-                    black_bb |= 1u64 << sq;
-                }
+            if !entry.is_valid() {
+                return false;
             }
 
-            // Check if we can use this cache entry (exact match only for now)
-            if let Some(diff_count) = entry.can_use(white_bb, black_bb) {
-                if diff_count == 0 {
-                    // Exact match! Just copy from cache - this is the fast path
-                    accumulator.accumulation[perspective].copy_from_slice(&*entry.accumulation);
-                    accumulator.psqt_accumulation[perspective]
-                        .copy_from_slice(&entry.psqt_accumulation);
-                    used_cache[perspective] = true;
-                }
-                // Note: Partial matches (diff_count > 0) would require complex delta updates
-                // For now, we fall back to full refresh when there's no exact match
-                // This still gives significant speedup for common cases like:
-                // - King returning to a previously visited square
-                // - Transpositions in the search tree
-            }
+            if let Some((removed, added)) = entry.compute_diff(pieces, king_sq) {
+                let removed_slice: Vec<(usize, usize)> =
+                    removed.iter().map(|p| (p.square, p.piece)).collect();
+                let added_slice: Vec<(usize, usize)> =
+                    added.iter().map(|p| (p.square, p.piece)).collect();
 
-            if !used_cache[perspective] {
-                // Full refresh needed for this perspective
+                accumulator.accumulation[perspective].copy_from_slice(&*entry.accumulation);
+                accumulator.psqt_accumulation[perspective]
+                    .copy_from_slice(&entry.psqt_accumulation);
+
+                accumulator.update_with_ksq(&added_slice, &removed_slice, king_squares, ft);
+            } else {
                 return false;
             }
         }
@@ -145,7 +201,6 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
         true
     }
 
-    /// Update cache entry after a full refresh
     pub fn update_cache(
         &mut self,
         accumulator: &Accumulator<SIZE>,
@@ -156,25 +211,30 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
             let king_sq = king_squares[perspective];
             let entry = &mut self.entries[king_sq][perspective];
 
-            // Store accumulator state
             entry
                 .accumulation
-                .copy_from_slice(&*accumulator.accumulation[perspective]);
+                .copy_from_slice(accumulator.accumulation[perspective].as_slice());
             entry
                 .psqt_accumulation
                 .copy_from_slice(&accumulator.psqt_accumulation[perspective]);
 
-            // Store piece bitboards
-            entry.white_pieces = 0;
-            entry.black_pieces = 0;
+            entry.by_color_bb.fill(0);
+            entry.by_type_bb.fill(0);
 
             for &(sq, pc) in pieces {
                 let color = pc / 8;
-                if color == 0 {
-                    entry.white_pieces |= 1u64 << sq;
-                } else {
-                    entry.black_pieces |= 1u64 << sq;
-                }
+                entry.by_color_bb[color] |= 1u64 << sq;
+
+                let piece_type = match pc % 8 {
+                    1 => 0,
+                    2 => 1,
+                    3 => 2,
+                    4 => 3,
+                    5 => 4,
+                    6 => 5,
+                    _ => continue,
+                };
+                entry.by_type_bb[piece_type] |= 1u64 << sq;
             }
 
             entry.valid = true;
@@ -188,7 +248,6 @@ impl<const SIZE: usize> Default for AccumulatorCache<SIZE> {
     }
 }
 
-/// Combined caches for both big and small networks
 pub struct FinnyTables {
     pub cache_big: AccumulatorCache<3072>,
     pub cache_small: AccumulatorCache<128>,
@@ -234,24 +293,24 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_can_use() {
+    fn test_cache_diff_count() {
         let mut entry: AccumulatorCacheEntry<128> = AccumulatorCacheEntry::new();
         let biases = vec![0i16; 128];
         entry.clear(&biases);
 
-        // Set cached position: white piece on e2 (square 12)
-        entry.white_pieces = 1u64 << 12;
+        entry.by_color_bb[0] = 1u64 << 12;
+        entry.by_type_bb[0] = 1u64 << 12;
 
-        // Exact match
-        let result = entry.can_use(1u64 << 12, 0);
-        assert_eq!(result, Some(0));
+        let pieces = vec![(12, 1usize)];
+        let diff = entry.count_diff(&pieces);
+        assert_eq!(diff, Some(0));
 
-        // One piece differs
-        let result = entry.can_use(1u64 << 12 | 1u64 << 13, 0);
-        assert_eq!(result, Some(1));
+        let pieces = vec![(12, 1), (13, 1)];
+        let diff = entry.count_diff(&pieces);
+        assert_eq!(diff, Some(1));
 
-        // Too many differences
-        let result = entry.can_use(0xFFFFFFFF, 0);
-        assert_eq!(result, None);
+        let pieces: Vec<(usize, usize)> = (0..32).map(|i| (i, 1)).collect();
+        let diff = entry.count_diff(&pieces);
+        assert_eq!(diff, None);
     }
 }
