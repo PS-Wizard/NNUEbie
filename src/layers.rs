@@ -117,7 +117,18 @@ impl Layer for AffineTransform {
     type Output = i32;
 
     fn propagate(&self, input: &[u8], output: &mut [i32]) {
-        #[cfg(target_arch = "x86_64")]
+        // Compile-time AVX2 path
+        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
+        unsafe {
+            return self.propagate_avx2(input, output);
+        }
+
+        // Runtime detection path (when no compile-time feature set)
+        #[cfg(all(
+            target_arch = "x86_64",
+            not(feature = "simd_avx2"),
+            not(feature = "simd_scalar")
+        ))]
         if is_x86_feature_detected!("avx2") {
             unsafe {
                 return self.propagate_avx2(input, output);
@@ -194,7 +205,18 @@ impl Layer for ClippedReLU {
     type Output = u8;
 
     fn propagate(&self, input: &[i32], output: &mut [u8]) {
-        #[cfg(target_arch = "x86_64")]
+        // Compile-time AVX2 path
+        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
+        unsafe {
+            return self.propagate_avx2(input, output);
+        }
+
+        // Runtime detection path (when no compile-time feature set)
+        #[cfg(all(
+            target_arch = "x86_64",
+            not(feature = "simd_avx2"),
+            not(feature = "simd_scalar")
+        ))]
         if is_x86_feature_detected!("avx2") {
             unsafe {
                 return self.propagate_avx2(input, output);
@@ -265,7 +287,18 @@ impl Layer for SqrClippedReLU {
     type Output = u8;
 
     fn propagate(&self, input: &[i32], output: &mut [u8]) {
-        #[cfg(target_arch = "x86_64")]
+        // Compile-time AVX2 path
+        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
+        unsafe {
+            return self.propagate_avx2(input, output);
+        }
+
+        // Runtime detection path (when no compile-time feature set)
+        #[cfg(all(
+            target_arch = "x86_64",
+            not(feature = "simd_avx2"),
+            not(feature = "simd_scalar")
+        ))]
         if is_x86_feature_detected!("avx2") {
             unsafe {
                 return self.propagate_avx2(input, output);

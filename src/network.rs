@@ -162,7 +162,18 @@ impl Network {
         us: usize,
         them: usize,
     ) {
-        #[cfg(target_arch = "x86_64")]
+        // Compile-time AVX2 path
+        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
+        unsafe {
+            return self.transform_features_avx2(accumulator, scratch, us, them);
+        }
+
+        // Runtime detection path (when no compile-time feature set)
+        #[cfg(all(
+            target_arch = "x86_64",
+            not(feature = "simd_avx2"),
+            not(feature = "simd_scalar")
+        ))]
         if is_x86_feature_detected!("avx2") {
             unsafe {
                 return self.transform_features_avx2(accumulator, scratch, us, them);
