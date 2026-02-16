@@ -38,7 +38,7 @@ fn main() {
         (Piece::BlackPawn, 55), // h7
     ];
 
-    probe.set_position(&pieces);
+    probe.set_position(&pieces, 0);
 
     let iterations = 1_000_000;
 
@@ -74,12 +74,12 @@ fn main() {
 
     // Reset and test without cache (simulated)
     println!("\nTest 2: King moves without cache (simulated full refresh)");
-    probe.set_position(&pieces);
+    probe.set_position(&pieces, 0);
 
     let start = Instant::now();
     for i in 0..iterations {
         // Simulate: set position from scratch each time (worst case)
-        probe.set_position(&pieces);
+        probe.set_position(&pieces, 0);
 
         // Move king to e2
         let pieces_e2 = vec![
@@ -101,11 +101,11 @@ fn main() {
             (Piece::BlackPawn, 54),
             (Piece::BlackPawn, 55),
         ];
-        probe.set_position(&pieces_e2);
+        probe.set_position(&pieces_e2, 0);
         std::hint::black_box(probe.evaluate(Color::White));
 
         // Move king back to e1
-        probe.set_position(&pieces);
+        probe.set_position(&pieces, 0);
         std::hint::black_box(probe.evaluate(Color::White));
 
         if i % 100000 == 0 && i > 0 {

@@ -52,7 +52,7 @@ fn main() {
         (Piece::BlackRook, 63),
     ];
 
-    probe.set_position(&pieces);
+    probe.set_position(&pieces, 0);
 
     let iterations = 1_000_000;
 
@@ -83,7 +83,7 @@ fn main() {
 
     // Test 2: Legacy update method (direct incremental)
     println!("\nTest 2: Legacy update method (direct incremental)");
-    probe.set_position(&pieces);
+    probe.set_position(&pieces, 0);
 
     let start = Instant::now();
     for i in 0..iterations {
@@ -108,12 +108,12 @@ fn main() {
 
     // Test 3: Full refresh (what happens without any optimization)
     println!("\nTest 3: Full refresh on each evaluation (worst case)");
-    probe.set_position(&pieces);
+    probe.set_position(&pieces, 0);
 
     let start = Instant::now();
     for i in 0..iterations {
         // Simulate: set position from scratch each time
-        probe.set_position(&pieces);
+        probe.set_position(&pieces, 0);
         std::hint::black_box(probe.evaluate(Color::Black));
 
         if i % 100000 == 0 && i > 0 {

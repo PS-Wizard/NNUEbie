@@ -156,7 +156,42 @@ mod tests {
 
         for (fen, name, expected) in cases {
             let (pieces, side) = parse_fen(fen);
-            let internal = eval.evaluate(&pieces, side);
+        let internal = eval.evaluate(&pieces, side, 0);
+        let material = calculate_material(&pieces);
+        let cp = to_centipawns(internal, material);
+        let white_cp = if side == BLACK { -cp } else { cp };
+
+        println!("Startpos: {} cp (white perspective)", white_cp);
+        assert!(white_cp.abs() < 50, "Start should be near 0");
+    }
+
+    #[test]
+    fn test_fen_eval_known_positions() {
+        let networks =
+            Arc::new(NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks"));
+        let mut eval = Evaluator::new(networks);
+
+        let cases = vec![
+            (
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                "Startpos",
+                7,
+            ),
+            (
+                "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                "e4",
+                37,
+            ),
+            (
+                "r1bqkb1r/pppp1ppp/2n2n2/3Pp3/4P3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 1",
+                "QGA",
+                113,
+            ),
+        ];
+
+        for (fen, name, expected) in cases {
+            let (pieces, side) = parse_fen(fen);
+            let internal = eval.evaluate(&pieces, side, 0);
             let material = calculate_material(&pieces);
             let cp = to_centipawns(internal, material);
             let white_cp = if side == BLACK { -cp } else { cp };
@@ -178,11 +213,11 @@ mod tests {
         let fen = "r1bqkb1r/pppp1ppp/2n2n2/3Pp3/4P3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 1";
         let (pieces, side) = parse_fen_for_probe(fen);
 
-        probe1.set_position(&pieces);
+        probe1.set_position(&pieces, 0);
         let internal1 = probe1.evaluate(side);
         let cp1 = to_cp(&pieces, side, internal1);
 
-        probe2.set_position(&pieces);
+        probe2.set_position(&pieces, 0);
         let internal2 = probe2.evaluate(side);
         let cp2 = to_cp(&pieces, side, internal2);
 
@@ -196,7 +231,7 @@ mod tests {
 
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let (pieces, side) = parse_fen_for_probe(fen);
-        probe.set_position(&pieces);
+        probe.set_position(&pieces, 0);
         let internal = probe.evaluate(side);
         let cp = to_cp(&pieces, side, internal);
 
@@ -210,7 +245,7 @@ mod tests {
 
         let fen = "r1bq1rk1/ppp1npbp/2np2p1/4p3/2P4N/2NP2P1/PP2PPBP/R1BQ1RK1 w - - 0 1";
         let (pieces, side) = parse_fen_for_probe(fen);
-        probe.set_position(&pieces);
+        probe.set_position(&pieces, 0);
         let internal = probe.evaluate(side);
         let cp = to_cp(&pieces, side, internal);
 
@@ -224,7 +259,7 @@ mod tests {
 
         let fen = "3r1rk1/5ppp/8/8/8/8/8/3R1RK1 w - - 0 1";
         let (pieces, side) = parse_fen_for_probe(fen);
-        probe.set_position(&pieces);
+        probe.set_position(&pieces, 0);
         let internal = probe.evaluate(side);
         let cp = to_cp(&pieces, side, internal);
 
@@ -243,8 +278,8 @@ mod tests {
         let (p_w, s_w) = parse_fen_for_probe(fen_w);
         let (p_b, s_b) = parse_fen_for_probe(fen_b);
 
-        probe_white.set_position(&p_w);
-        probe_black.set_position(&p_b);
+        probe_white.set_position(&p_w, 0);
+        probe_black.set_position(&p_b, 0);
 
         let cp_w = to_cp(&p_w, s_w, probe_white.evaluate(s_w));
         let cp_b = to_cp(&p_b, s_b, probe_black.evaluate(s_b));
@@ -333,7 +368,7 @@ mod manual_verification {
     fn probe(fen: &str) -> i32 {
         let mut p = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
         let (pieces, side) = parse_fen(fen);
-        p.set_position(&pieces);
+        p.set_position(&pieces, 0);
         let internal = p.evaluate(side);
         to_cp(&pieces, side, internal)
     }

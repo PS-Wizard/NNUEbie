@@ -81,7 +81,7 @@ fn main() {
                 NNUEProbe::with_networks(networks_clone).expect("Failed to create probe");
 
             // Warmup
-            probe.set_position(&pieces_clone);
+            probe.set_position(&pieces_clone, 0);
             for _ in 0..100 {
                 std::hint::black_box(probe.evaluate(Color::White));
             }
@@ -92,7 +92,7 @@ fn main() {
             // Benchmark loop (Full Refresh)
             for _ in 0..iterations_per_thread {
                 // Simulate setting a new position (invalidates accumulators -> triggers refresh)
-                probe.set_position(&pieces_clone);
+                probe.set_position(&pieces_clone, 0);
                 std::hint::black_box(probe.evaluate(Color::White));
             }
 
@@ -101,7 +101,7 @@ fn main() {
 
             // Benchmark Incremental Update
             let iterations_inc = 1_000_000;
-            probe.set_position(&pieces_clone);
+            probe.set_position(&pieces_clone, 0);
 
             // Sync before starting incremental phase
             barrier_clone.wait();
