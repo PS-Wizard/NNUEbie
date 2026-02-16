@@ -16,7 +16,7 @@ pub struct NNUEProbe {
     non_pawn_material: [i32; 2],
     accumulator_stack: AccumulatorStack,
     finny_tables: FinnyTables,
-    rule50: i32,
+    // rule50 field removed
 }
 
 impl NNUEProbe {
@@ -44,7 +44,6 @@ impl NNUEProbe {
             non_pawn_material: [0; 2],
             accumulator_stack: AccumulatorStack::new(),
             finny_tables,
-            rule50: 0,
         })
     }
 
@@ -57,7 +56,9 @@ impl NNUEProbe {
         self.non_pawn_material = [0; 2];
         self.king_squares = [0; 2];
         self.accumulator_stack.reset();
-        self.rule50 = rule50;
+
+        // Set rule50 on the root state
+        self.accumulator_stack.state_at_mut(0).rule50 = rule50;
 
         for &(piece, square) in pieces {
             self.add_piece_internal(piece, square);
@@ -167,21 +168,28 @@ impl NNUEProbe {
         // For captures: remove from from_sq, add to to_sq (overwriting captured)
         dirty.add_change(from_sq, to_sq, from_piece.index(), piece.index());
 
-        // Push onto stack
-        self.accumulator_stack.push(&dirty);
+        if _to_piece != Piece::None {
+            // Explicitly remove the captured piece
+            // We use to_sq as both from and to, but piece_to is None (0) so it won't be added
+            dirty.add_change(to_sq, to_sq, _to_piece.index(), Piece::None.index());
+        }
 
         // Rule50 update (simple logic: reset on pawn move or capture, else increment)
-        // Note: _to_piece is the captured piece
-        if piece.piece_type() == 1 || _to_piece != Piece::None {
-            self.rule50 = 0;
+        // We need to read previous rule50 from current state
+        let prev_rule50 = self.accumulator_stack.latest().rule50;
+        let new_rule50 = if piece.piece_type() == 1 || _to_piece != Piece::None {
+            0
         } else {
-            self.rule50 += 1;
-        }
+            prev_rule50 + 1
+        };
+
+        // Push onto stack
+        self.accumulator_stack.push(&dirty, new_rule50);
 
         // Update accumulators incrementally (unless king moved)
         if piece.is_king() {
-            // King moves - try to use Finny Tables for faster refresh
-            self.refresh_with_cache();
+            // King moves - do a full refresh (Finny Tables cache not safe during make/unmake)
+            self.refresh_accumulators();
         } else {
             // Incremental update
             self.accumulator_stack.update_incremental(
@@ -212,10 +220,7 @@ impl NNUEProbe {
         // Pop from stack - O(1)!
         self.accumulator_stack.pop();
 
-        // Restore rule50 - simplistic, just decrement.
-        // In a real engine, rule50 would be restored from history stack.
-        // For benchmarks, this is fine. For validation, we don't unmake.
-        self.rule50 = self.rule50.saturating_sub(1);
+        // Rule50 is implicitly restored because we popped the state
     }
 
     /// Legacy update method - applies changes directly to current accumulators
@@ -430,7 +435,7 @@ impl NNUEProbe {
         let mut v = (nnue_val * (77777 + material) + optimism * (7777 + material)) / 77777;
 
         // Damp down the evaluation linearly when shuffling
-        v -= v * self.rule50 / 212;
+        v -= v * latest_state.rule50 / 212;
 
         // Clamp to avoid tablebase range overlaps
         v.clamp(-31753, 31753)

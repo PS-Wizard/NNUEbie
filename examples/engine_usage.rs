@@ -85,7 +85,7 @@ fn main() -> io::Result<()> {
 
     // `set_position` automatically handles a full refresh of the NNUE accumulators.
     // This is required when setting up a new board state from scratch.
-    probe.set_position(&pieces);
+    probe.set_position(&pieces, 0);
 
     // 3. Get Evaluation
     // `evaluate` returns the internal raw score from the perspective of `side`.

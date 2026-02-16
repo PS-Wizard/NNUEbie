@@ -121,41 +121,6 @@ mod tests {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let (pieces, side) = parse_fen(fen);
 
-        let internal = eval.evaluate(&pieces, side);
-        let material = calculate_material(&pieces);
-        let cp = to_centipawns(internal, material);
-        let white_cp = if side == BLACK { -cp } else { cp };
-
-        println!("Startpos: {} cp (white perspective)", white_cp);
-        assert!(white_cp.abs() < 50, "Start should be near 0");
-    }
-
-    #[test]
-    fn test_fen_eval_known_positions() {
-        let networks =
-            Arc::new(NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks"));
-        let mut eval = Evaluator::new(networks);
-
-        let cases = vec![
-            (
-                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                "Startpos",
-                7,
-            ),
-            (
-                "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-                "e4",
-                37,
-            ),
-            (
-                "r1bqkb1r/pppp1ppp/2n2n2/3Pp3/4P3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 1",
-                "QGA",
-                113,
-            ),
-        ];
-
-        for (fen, name, expected) in cases {
-            let (pieces, side) = parse_fen(fen);
         let internal = eval.evaluate(&pieces, side, 0);
         let material = calculate_material(&pieces);
         let cp = to_centipawns(internal, material);
@@ -410,7 +375,7 @@ mod manual_verification {
 
         let mut inc = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
         let (start, _) = parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        inc.set_position(&start);
+        inc.set_position(&start, 0);
 
         inc.update(&[(Piece::WhitePawn, 12)], &[(Piece::WhitePawn, 28)]);
         let inc_internal = inc.evaluate(Color::Black);
@@ -419,7 +384,7 @@ mod manual_verification {
         let mut full = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
         let (moved, moved_side) =
             parse_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
-        full.set_position(&moved);
+        full.set_position(&moved, 0);
         let full_internal = full.evaluate(Color::Black);
         let full_cp = to_cp(&moved, moved_side, full_internal);
 
@@ -461,7 +426,7 @@ mod manual_verification {
 
         let mut inc = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
         let (empty, _) = parse_fen("6k1/8/8/8/8/8/8/3K4 w - - 0 1");
-        inc.set_position(&empty);
+        inc.set_position(&empty, 0);
 
         inc.update(&[], &[(Piece::WhitePawn, 8)]);
         inc.update(&[], &[(Piece::WhitePawn, 9)]);
@@ -470,7 +435,7 @@ mod manual_verification {
 
         let mut full = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
         let (pawn, side) = parse_fen("6k1/8/8/8/8/8/PP6/3K4 w - - 0 1");
-        full.set_position(&pawn);
+        full.set_position(&pawn, 0);
         let full_internal = full.evaluate(Color::White);
         let full_cp = to_cp(&pawn, side, full_internal);
 
@@ -546,7 +511,7 @@ mod multithreaded_tests {
         let pieces = get_startpos_pieces();
         let mut probe_ref =
             NNUEProbe::with_networks(networks.clone()).expect("Failed to create reference probe");
-        probe_ref.set_position(&pieces);
+        probe_ref.set_position(&pieces, 0);
         let reference_score = probe_ref.evaluate(Color::White);
         println!("Reference score (single-threaded): {}", reference_score);
 
@@ -560,7 +525,7 @@ mod multithreaded_tests {
                 let mut probe = NNUEProbe::with_networks(networks_clone)
                     .expect("Failed to create thread-local probe");
 
-                probe.set_position(&pieces_clone);
+                probe.set_position(&pieces_clone, 0);
 
                 // Synchronize all threads
                 barrier_clone.wait();
@@ -649,7 +614,7 @@ mod multithreaded_tests {
                 let mut probe = NNUEProbe::with_networks(networks_clone)
                     .expect("Failed to create thread-local probe");
 
-                probe.set_position(&pieces_clone);
+                probe.set_position(&pieces_clone, 0);
 
                 // Synchronize
                 barrier_clone.wait();

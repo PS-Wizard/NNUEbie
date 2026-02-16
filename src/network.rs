@@ -292,7 +292,8 @@ impl Network {
 
         // Residual scaling
         let residual = scratch.fc_0_out[15];
-        let fwd_out = residual * (600 * OUTPUT_SCALE) / (127 * (1 << WEIGHT_SCALE_BITS));
+        let fwd_out = (residual as i64 * (600 * OUTPUT_SCALE) as i64
+            / (127 * (1 << WEIGHT_SCALE_BITS)) as i64) as i32;
 
         let positional = scratch.fc_2_out[0] + fwd_out;
 

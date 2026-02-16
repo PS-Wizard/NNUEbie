@@ -57,6 +57,7 @@ pub struct AccumulatorState {
     pub acc_small: Accumulator<128>,
     pub dirty_piece: DirtyPiece,
     pub computed: [bool; 2], // Track if each perspective is computed
+    pub rule50: i32,
 }
 
 impl AccumulatorState {
@@ -66,12 +67,14 @@ impl AccumulatorState {
             acc_small: Accumulator::new(),
             dirty_piece: DirtyPiece::new(),
             computed: [false, false],
+            rule50: 0,
         }
     }
 
-    pub fn reset(&mut self, dp: &DirtyPiece) {
+    pub fn reset(&mut self, dp: &DirtyPiece, rule50: i32) {
         self.dirty_piece = dp.clone();
         self.computed = [false, false];
+        self.rule50 = rule50;
     }
 }
 
@@ -122,7 +125,7 @@ impl AccumulatorStack {
     /// Push a new position onto the stack (make move)
     /// Stockfish-style: no deep copy of accumulators - just mark as not computed
     /// This avoids copying ~12KB on every move
-    pub fn push(&mut self, dirty_piece: &DirtyPiece) {
+    pub fn push(&mut self, dirty_piece: &DirtyPiece, rule50: i32) {
         assert!(
             self.current_idx + 1 < self.stack.capacity(),
             "AccumulatorStack overflow - increase MAX_PLY"
@@ -136,7 +139,7 @@ impl AccumulatorStack {
         // Stockfish approach: NO copying!
         // Just mark the state as needing recomputation
         // The accumulators from previous state will be reused via incremental updates
-        self.stack[self.current_idx].reset(dirty_piece);
+        self.stack[self.current_idx].reset(dirty_piece, rule50);
 
         self.current_idx += 1;
     }
@@ -195,17 +198,20 @@ impl AccumulatorStack {
             let mut added_count = 0;
 
             for j in 0..self.stack[i].dirty_piece.dirty_num {
-                removed[removed_count] = (
-                    self.stack[i].dirty_piece.from[j],
-                    self.stack[i].dirty_piece.piece_from[j],
-                );
-                removed_count += 1;
-
-                added[added_count] = (
-                    self.stack[i].dirty_piece.to[j],
-                    self.stack[i].dirty_piece.piece_to[j],
-                );
-                added_count += 1;
+                if self.stack[i].dirty_piece.piece_from[j] != 0 {
+                    removed[removed_count] = (
+                        self.stack[i].dirty_piece.from[j],
+                        self.stack[i].dirty_piece.piece_from[j],
+                    );
+                    removed_count += 1;
+                }
+                if self.stack[i].dirty_piece.piece_to[j] != 0 {
+                    added[added_count] = (
+                        self.stack[i].dirty_piece.to[j],
+                        self.stack[i].dirty_piece.piece_to[j],
+                    );
+                    added_count += 1;
+                }
             }
 
             let removed_slice = &removed[..removed_count];
@@ -328,7 +334,7 @@ mod tests {
         // Push a move
         let mut dp = DirtyPiece::new();
         dp.add_change(12, 28, 1, 1); // White pawn e2->e4
-        stack.push(&dp);
+        stack.push(&dp, 0);
 
         assert_eq!(stack.current_idx, 2);
         assert_eq!(stack.latest().dirty_piece.dirty_num, 1);
@@ -347,7 +353,7 @@ mod tests {
         for i in 0..10 {
             let mut dp = DirtyPiece::new();
             dp.add_change(i, i + 1, 1, 1);
-            stack.push(&dp);
+            stack.push(&dp, 0);
         }
 
         assert_eq!(stack.current_idx, 11);

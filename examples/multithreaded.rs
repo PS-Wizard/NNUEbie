@@ -77,7 +77,7 @@ fn main() {
             ];
 
             // 4. Set Position
-            probe.set_position(&startpos);
+            probe.set_position(&startpos, 0);
 
             // Synchronize threads for demo purposes
             barrier_clone.wait();
