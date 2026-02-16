@@ -8,418 +8,236 @@ This document outlines the performance optimization phases for the nnuebie Rust 
 
 - **Phase 1.1**: Memory Alignment - DONE
 - **Phase 1.2**: Finny Tables (AccumulatorCaches) - DONE
-- **Phase 1.3**: Weight Permutation - **CRITICAL - NOT IMPLEMENTED**
-- **Phase 1.4**: Accumulator Deep Copy Fix - **PARTIALLY IMPLEMENTED**
+- **Phase 1.3**: Weight Permutation - DONE ✅
+- **Phase 1.4**: Accumulator Deep Copy Fix - **NOT IMPLEMENTED** ❌
+- **Phase 2.1**: Tile-based Register Accumulation - PENDING
+- **Phase 2.2**: VNNI for MLP Layers - PENDING
+- **Phase 2.3**: Pre-populate Finny Tables Cache - PENDING
 
 ## Current Performance
 
-| Benchmark | Current | Target |
-|-----------|---------|--------|
-| Full Refresh | ~220K/s | 400K/s |
-| Incremental Update | ~1.18M/s | 2.5M/s |
+| Benchmark | Current | Stockfish (ref) | Target |
+|-----------|---------|-----------------|--------|
+| Full Refresh | ~218K/s | ~400K/s | 400K/s |
+| Incremental Update | ~1.21M/s | ~3M/s | 2.5M/s |
+| Speedup Ratio | 5.54x | ~7x | - |
+
+### Hot Path Analysis (perf report)
+
+```
+65.64%  add_feature_avx2        # PRIMARY BOTTLENECK
+13.37%  AffineTransform::propagate
+ 6.13%  NNUEProbe::evaluate
+ 4.42%  refresh_accumulators
+ 3.03%  remove_feature_avx2
+```
+
+**Key Insight**: `add_feature_avx2` dominates runtime. Weight permutation provided minimal benefit because the feature transformer is only 6% of runtime. The real bottleneck is the accumulator update (add/remove features).
 
 ---
 
-## Phase 1.3 Deep Dive: Weight Permutation
+## Phase 1.3 Deep Dive: Weight Permutation (COMPLETED)
 
-### What is Weight Permutation?
+### What Was Done
 
-Weight permutation is a memory layout optimization Stockfish applies at **load time** to reorganize network weights for optimal SIMD behavior. It's specifically about the `_mm256_packus_epi16` instruction used in the feature transformer.
+1. **Added permutation function** to `feature_transformer.rs`
+2. **Applied PackusEpi16Order** pattern at load time: `[0, 2, 1, 3, 4, 6, 5, 7]`
+3. **Rewrote transform_features_avx2** to use:
+   - Interleaved access: `j*2` and `j*2+1`
+   - Asymmetric clipping (max on first operand only)
+   - Direct `_mm256_packus_epi16` to combine and clip
 
-**The Problem**: `_mm256_packus_epi16` takes two 256-bit vectors (containing sixteen 16-bit integers each) and interleaves them into one 256-bit vector of 8-bit results with a **specific ordering**:
-- First: elements 0,2,4,6,... from both input vectors
-- Then: elements 1,3,5,7,... from both input vectors
-
-If weights are stored in standard row-major order, the pack instruction produces **wrong results**. Stockfish solves this by permuting weights at load time so the pack instruction produces correct output directly.
-
-### Stockfish's Implementation (`nnue_feature_transformer.h:264-319`)
-
-**Permutation Order for AVX2:**
-```cpp
-static constexpr auto PackusEpi16Order = []() -> std::array<std::size_t, 8> {
-    return {0, 2, 1, 3, 4, 6, 5, 7};  // AVX2
-}();
-```
-
-**The permutation function (lines 158-185):**
-```cpp
-template<std::size_t BlockSize, typename T, std::size_t N, std::size_t OrderSize>
-void permute(T (&data)[N], const std::array<std::size_t, OrderSize>& order) {
-    // Divides data into blocks of BlockSize * OrderSize bytes
-    // Reorders each group according to 'order' array
-    // BlockSize=16 (i16 = 2 bytes, so 16 i16s = 32 bytes = one 256-bit vector)
-}
-```
-
-**In read_parameters (lines 312-321):**
-```cpp
-bool read_parameters(std::istream& stream) {
-    read_leb_128<BiasType>(stream, biases, HalfDimensions);
-    read_leb_128<WeightType>(stream, weights, ...);
-    read_leb_128<PSQTWeightType>(stream, psqtWeights, ...);
-    
-    permute_weights();      // <-- MISSING IN NNU EBIE
-    scale_weights(true);   // Scale by 2 after permutation
-    return !stream.fail();
-}
-```
-
-### What nnuebie Does vs. What It Should Do
-
-**Current (`feature_transformer.rs:26-48`):**
-```rust
-pub fn read_parameters(&mut self, reader: &mut R, skip_first_magic: bool) -> io::Result<()> {
-    // ... read weights
-    // Scale by 2 only - NO PERMUTATION!
-    for b in &mut biases_vec { *b = b.wrapping_mul(2); }
-    for w in &mut weights_vec { *w = w.wrapping_mul(2); }
-    // Convert to AlignedBuffer
-    ...
-}
-```
-
-**What's Missing:**
-1. Apply permutation after reading, before scaling
-2. The permutation must happen in 16-element blocks (256-bit = 16 x i16)
-
-### How to Implement in nnuebie
+### Implementation Details
 
 ```rust
-// In feature_transformer.rs
-
-// AVX2 permutation order
+// feature_transformer.rs
 const PACKUS_EPI16_ORDER: [usize; 8] = [0, 2, 1, 3, 4, 6, 5, 7];
 
 fn permute_weights(data: &mut [i16]) {
-    const BLOCK_SIZE: usize = 16; // 16 i16 = 32 bytes = 256 bits
-    const ORDER_SIZE: usize = 8;
-    const CHUNK_SIZE: usize = BLOCK_SIZE * ORDER_SIZE; // 128 elements per chunk
-    
-    let mut buffer = vec![0i16; CHUNK_SIZE];
-    
-    let mut i = 0;
-    while i < data.len() {
-        // Process one chunk at a time
-        for j in 0..ORDER_SIZE {
-            let src_offset = i + PACKUS_EPI16_ORDER[j] * BLOCK_SIZE;
-            buffer[j * BLOCK_SIZE..(j + 1) * BLOCK_SIZE]
-                .copy_from_slice(&data[src_offset..src_offset + BLOCK_SIZE]);
-        }
-        data[i..i + CHUNK_SIZE].copy_from_slice(&buffer);
-        i += CHUNK_SIZE;
-    }
-}
-
-pub fn read_parameters(&mut self, reader: &mut R, skip_first_magic: bool) -> io::Result<()> {
-    // ... read weights
-    permute_weights(&mut biases_vec);  // ADD THIS
-    permute_weights(&mut weights_vec); // ADD THIS
-    // Then scale by 2
-    for b in &mut biases_vec { *b = b.wrapping_mul(2); }
-    for w in &mut weights_vec { *w = w.wrapping_mul(2); }
-    // ...
+    // Reorder 16-element blocks according to PackusEpi16Order
 }
 ```
 
+```rust
+// network.rs - transform_features_avx2
+// Process 32 output elements per iteration
+for j in (0..n).step_by(32) {
+    let v0a = _mm256_load_si256(acc_ptr.add(j));
+    let v0b = _mm256_load_si256(acc_ptr.add(j + 16));
+    // Asymmetric clipping
+    let v0a_c = _mm256_max_epi16(max, _mm256_min_epi16(min, v0a));
+    let v1a_c = _mm256_min_epi16(min, v1a);
+    // mulhi + packus
+    let packed = _mm256_packus_epi16(pa, pb);
+}
+```
+
+### Results
+
+- ✅ All validation tests pass (exact match with Stockfish)
+- ✅ Modest ~4% improvement in incremental throughput
+- ✅ Reduced instruction count in feature transformer
+
+### Why Limited Impact
+
+The feature transformer is only ~6% of total runtime. The major bottleneck is `add_feature_avx2` (65% of runtime), which was not addressed by weight permutation.
+
 ---
 
-## Phase 1.4 Deep Dive: Accumulator Deep Copy Fix
+## Phase 1.4 Deep Dive: Accumulator Deep Copy Fix (NOT IMPLEMENTED ❌)
 
-### Current State: Partially Implemented
+### The Problem
 
-**What's Done:**
-- `push()` does NOT clone accumulators (good!)
-- Uses lazy evaluation - finds last computed state
-
-**What's Still Wrong:**
-In `accumulator_stack.rs:177-210`, `update_incremental()` still **copies entire accumulator** when it finds a computed state:
+In `accumulator_stack.rs:182-202`, the code STILL copies entire accumulators:
 
 ```rust
-let source_accum: Option<(...)> = if self.stack[last_computed_idx].computed == [true, true] {
+// Lines 182-188 - STILL COPYING!
+let source_big: Option<(Vec<i16>, Vec<i16>, [[i32; 8]; 2])> = if has_computed {
     let source = &self.stack[last_computed_idx];
     Some((
-        source.acc_big.accumulation[0].as_slice().to_vec(),  // COPY!
-        source.acc_big.accumulation[1].as_slice().to_vec(),  // COPY!
-        // ...
+        source.acc_big.accumulation[0].as_slice().to_vec(),  // COPY! ~6KB
+        source.acc_big.accumulation[1].as_slice().to_vec(),  // COPY! ~6KB
+        source.acc_big.psqt_accumulation,
     ))
-} else { None };
+} else {
+    None
+};
 ```
 
-This copies ~12KB per update - not acceptable for O(1) push.
+Despite the comment at line 136 claiming "Stockfish approach: NO copying!", the code uses `.to_vec()` which allocates and copies ~12KB on every incremental update.
 
-### What Stockfish Does (Truly O(1))
+### What Stockfish Actually Does
 
-Stockfish's `push()` does literally **nothing** - no copying at all:
-- Only marks state as "dirty"
-- At evaluation time, lazily finds last computed state and updates from there
+1. **`push()`** - literally does NOTHING except mark state as dirty
+2. **At evaluation time** - finds last computed state, then:
+   - Uses shared memory (no copy needed)
+   - Updates forward from source state in-place
 
-The key insight: Stockfish doesn't copy in update_incremental. Instead:
-1. They store a reference/pointer to the previous computed state
-2. At evaluation time, they propagate forward from that state
+### Required Fix
 
-### Fix for nnuebie
+Replace `.to_vec()` copies with direct slice copies, or better - avoid copying entirely by updating in-place from source.
 
-Remove the copy in `update_incremental()`. Instead, store a pointer/index to the source state and use pointer arithmetic for updates. The key is that the actual copying happens implicitly through shared memory references.
+### Impact
+
+- Each `update_incremental` copies ~12KB (big) + ~256 bytes (small)
+- For search with 100K+ nodes, this adds significant overhead
 
 ---
 
-## Why VNNI Gives Incorrect Results
+## Phase 2: Next Optimizations
 
-VNNI requires **two** things to work correctly:
+### Phase 2.1: Tile-based Register Accumulation (HIGH PRIORITY)
 
-### 1. Weight Scrambling in AffineTransform
+**Problem**: Current implementation loads 4 vectors (64 elements), adds, stores immediately. This causes high memory bandwidth usage.
 
-Stockfish (`affine_transform.h:153-156`):
-```cpp
-static constexpr IndexType get_weight_index_scrambled(IndexType i) {
-    return (i / 4) % (PaddedInputDimensions / 4) * OutputDimensions * 4
-         + i / PaddedInputDimensions * 4 + i % 4;
+**Stockfish's Approach** (nnue_accumulator.cpp:266-318):
+- Load 8+ SIMD registers at once (TileHeight = 128 bytes = 8 AVX2 registers)
+- Accumulate in registers across all pieces
+- Store once at the end
+
+**Implementation**:
+```rust
+// Instead of: add_feature per piece, store each time
+// Do: accumulate in registers, store once
+
+unsafe fn add_feature_avx2_batch(acc: &mut [i16], weights: &[&[i16]]) {
+    // Load all feature columns into registers first
+    // Then add to accumulator registers
+    // Finally store once
 }
 ```
 
-This reorders weights so VNNI's dot product instruction (`_mm256_dpbusd_epi32`) works correctly. The pattern transposes the weight matrix in 4x4 blocks.
+**Expected Impact**: 30-50% speedup in add_feature (biggest win)
 
-### 2. Proper Feature Transformer Permutation
+### Phase 2.2: VNNI for MLP Layers (MEDIUM PRIORITY)
 
-The weights must be permuted as described above for `packus` to work.
-
-### What's Wrong in nnuebie:
-
-1. **No weight scrambling in layers.rs** - Uses row-major order (`j * padded_input_dims + i`)
-2. **No permutation in feature_transformer.rs** - Weights aren't reordered for packus
-3. **No VNNI path in layers.rs** - Uses `_mm256_maddubs_epi16` + `_mm256_madd_epi16` instead of `_mm256_dpbusd_epi32`
-
-The current implementation in `layers.rs:74-88`:
+**Problem**: Current affine transform uses:
 ```rust
-// maddubs: input unsigned, weight signed
-let p0 = _mm256_maddubs_epi16(input_vec, w0);
-let s0 = _mm256_madd_epi16(p0, ones);  // Extra instruction
-acc0 = _mm256_add_epi32(acc0, s0);
-```
-
-Stockfish uses VNNI when available (simd.h:68-77):
-```cpp
-#if defined(USE_VNNI)
-    acc = _mm256_dpbusd_epi32(acc, a, b);  // Single instruction!
-#else
-    __m256i product0 = _mm256_maddubs_epi16(a, b);
-    product0 = _mm256_madd_epi16(product0, _mm256_set1_epi16(1));
-    acc = _mm256_add_epi32(acc, product0);
-#endif
-```
-
-### Summary: Why Your VNNI Attempts Failed
-
-When you tried VNNI, you likely got wrong evaluations because:
-1. Without weight permutation, the packus instruction produces scrambled output
-2. Without weight scrambling, the VNNI dot product computes wrong values (wrong weight × input pairings)
-3. These errors compound through the network layers
-
-The validation should fail if you compare against Stockfish's output.
-
----
-
-## Critical Issues Summary
-
-### 1. Weight Permutation NOT Implemented (Phase 1.3 - CRITICAL)
-
-**Problem**: nnuebie reads weights in standard file order, but Stockfish permutes weights at load time for optimal SIMD behavior.
-
-**Expected Impact**: 15-30% improvement in feature transformation
-
-### 2. MLP Weight Scrambling NOT Implemented (CRITICAL)
-
-**Problem**: Stockfish uses scrambled weight ordering in affine transforms to enable VNNI dot product instructions.
-
-**Expected Impact**: 10-20% improvement in MLP propagation
-
-### 3. Feature Transformer Multiplication Not Optimized
-
-**Problem**: Stockfish uses `mulhi` for faster multiplication. -- DONE in nnuebie
-
-**Stockfish Approach** (`nnue_feature_transformer.h:427-446`):
-```cpp
-// Scale by 2 at load time allows using mulhi (shift left 6, mulhi = shift right 16, net = 9)
-// Dividing by 128 * 2 * 2 = 512 = shift right 9
-const vec_t sum0a = vec_slli_16(vec_max_16(vec_min_16(in0[j*2+0], One), 6), shift);
-const vec_t pa = vec_mulhi_16(sum0a, sum1a);  // Fast!
-out[j] = vec_packus_16(pa, pb);
-```
-
-**nnuebie Approach** (`network.rs:213`):
-```rust
-let prod = _mm256_mullo_epi16(v0_c, v1_c);  // Slower regular mul
-let res = _mm256_srli_epi16(prod, 9);
-```
-
-### 4. Missing VNNI for MLP
-
-**Stockfish** (`simd.h:68-77`):
-```cpp
-#if defined(USE_VNNI)
-    acc = _mm256_dpbusd_epi32(acc, a, b);  // Single instruction!
-#else
-    __m256i product0 = _mm256_maddubs_epi16(a, b);
-    product0 = _mm256_madd_epi16(product0, _mm256_set1_epi16(1));
-    acc = _mm256_add_epi32(acc, product0);
-#endif
-```
-
-**nnuebie** (`layers.rs:74-88`):
-```rust
-// Always uses non-VNNI path
 let p0 = _mm256_maddubs_epi16(input_vec, w0);
 let s0 = _mm256_madd_epi16(p0, ones);
 acc0 = _mm256_add_epi32(acc0, s0);
 ```
 
-### 5. No Prefetching
-
-Stockfish uses `_mm_prefetch` for cache optimization in hot paths. nnuebie doesn't use prefetching.
-
----
-
-## Implementation Plan
-
-### Phase 2.1: Weight Permutation (High Priority)
-
-1. Add permutation function to `feature_transformer.rs`
-2. Apply `PackusEpi16Order` pattern at load time
-3. Update `transform_features` to work with permuted weights
-
-**Files to modify**:
-- `src/feature_transformer.rs` - Add permutation
-
-### Phase 2.2: MLP Weight Scrambling (High Priority)
-
-1. Add scrambled weight indexing to `AffineTransform`
-2. Implement proper VNNI path in `layers.rs`
-3. Use `_mm256_dpbusd_epi32` when available
-
-**Files to modify**:
-- `src/layers.rs` - Rewrite affine transform
-
-### Phase 2.3: Optimize Feature Transformer Multiply
-
-1. Change from `mullo` + `srli` to `slli` + `mulhi`
-2. Ensure weights are scaled by 2 at load time
-
-**Files to modify**:
-- `src/network.rs` - Update transform_features_avx2
-
-### Phase 2.4: Improve Accumulator Stack
-
-1. Remove accumulator copy in `update_incremental()`
-2. Use reference/index instead of copying
-
-**Files to modify**:
-- `src/accumulator_stack.rs`
-
-### Phase 2.5: Add Prefetching
-
-1. Add `_mm_prefetch` calls in hot loops
-
----
-
-## Phase 1.1: Better Memory Alignment (Memory Alignment)
-
-## Phase 1.2: AccumulatorCaches (Finny Tables)
-
-### What Are Finny Tables?
-Stockfish caches partial accumulator updates per king square position. This avoids recalculating from scratch when only the king moves.
-
-### Implementation Details
-- Create `AccumulatorCache` struct with 64 entries (one per king square per color)
-- Each entry stores the accumulator state for that king position
-- On king move: instead of full refresh, copy from cached state + apply piece differences
-
-### Expected Performance Gain
-- **2-4x speedup** when king moves (common in chess)
-- ~10-20% overall improvement in typical search
-
-### Files to Modify
-1. `src/accumulator.rs` - Add `AccumulatorCache` struct
-2. `src/nnue.rs` - Integrate cache lookups
-3. `src/accumulator_stack.rs` - Update on king moves
-
-### Reference Implementation
-See `archive/nnue/Stockfish-sf_17.1/src/nnue/nnue_accumulator.h` lines 47-80
-
----
-
-## Phase 1.3: Weight Permutation
-
-### What Is Weight Permutation?
-Stockfish permutes network weights to improve SIMD efficiency. Elements that are processed together in SIMD are stored adjacently in memory.
-
-### Current Implementation
-- Current: weights stored in standard file order
-- Scale factor: only multiplies by 2
-
-### Stockfish Approach
-1. **Reorder weights** - Group features for better cache behavior
-2. **Scale by 2** - Already done
-3. **VNNI optimization** - Use `_mm256_dpbusd_epi32` for dot products
-
-### Expected Performance Gain
-- ~5-10% improvement in MLP evaluation
-- Better cache utilization
-
-### Files to Modify
-1. `src/feature_transformer.rs` - Add weight permutation in `read_parameters`
-2. `src/layers.rs` - Implement weight scrambling for VNNI
-
-### Reference Implementation
-See `archive/nnue/Stockfish-sf_17.1/src/nnue/nnue_feature_transformer.h` lines 289-319
-
----
-
-## Phase 1.4: Accumulator Deep Copy Fix
-
-### Current Problem
-In `accumulator_stack.rs`, the `update_incremental()` method copies entire accumulators:
-```rust
-source.acc_big.accumulation[0].as_slice().to_vec(),  // COPY!
+**Stockfish's VNNI path**:
+```cpp
+acc = _mm256_dpbusd_epi32(acc, a, b);  // Single instruction!
 ```
-This copies ~12KB every time a computed state is found.
 
-### Stockfish Approach
-Stockfish uses a **copy-on-write** strategy:
-- Stack entries share the same accumulator memory
-- Only mark which perspective is "dirty"
-- On access, recompute only what's needed
+**Required**: Weight scrambling for VNNI compatibility
 
-### Expected Performance Gain
-- **~50% reduction** in push() overhead
-- Significant improvement in make/unmake performance
+**Expected Impact**: 15-25% speedup in MLP propagation
 
-### Files to Modify
-1. `src/accumulator_stack.rs` - Remove copying in update_incremental
+### Phase 2.3: Optimize Refresh with Cached Delta
 
-### Reference Implementation
-See `archive/nnue/Stockfish-sf_17.1/src/nnue/nnue_accumulator.h` - `State` struct
+**Problem**: Even with Finny Tables, refresh does full add/remove operations.
 
----
+**Stockfish's Approach**:
+- Uses cached entry directly with delta computation
+- Single fused add-sub operation per piece
+- Batched PSQT updates
 
-## Phase 1.5: Thread-Local Networks (Optional)
+**Expected Impact**: 20-30% speedup in refresh scenarios
 
-### What Is This?
-Stockfish creates a copy of the network for each search thread to avoid lock contention.
+### Phase 2.4: Pre-populate Finny Tables Cache (HIGH PRIORITY)
 
-### Implementation
+**Problem**: Current Finny Tables cache starts with BIASES only (no pieces).
+
+**Stockfish's Approach**:
+- At initialization, for EACH king square (64 positions):
+  - Compute FULL accumulator with ALL pieces
+  - Store in cache entry
+- On king move: COPY from cache (instant!)
+
+**Current Implementation**:
 ```rust
-thread_local! {
-    static NETWORKS: NnueNetworks = NnueNetworks::new();
+pub fn clear(&mut self, biases: &[i16]) {
+    for square_entries in &mut self.entries {
+        for entry in square_entries {
+            entry.clear(biases);  // Only biases, no pieces!
+        }
+    }
 }
 ```
 
-### Expected Performance Gain
-- Eliminates mutex contention in multi-threaded search
-- ~10-30% improvement with many search threads
+**Required**: Pre-populate with full piece sets for each king position.
 
-### Files to Modify
-1. `src/nnue.rs` - Add thread-local storage
-2. `src/lib.rs` - Export for thread-local use
+**Expected Impact**: 50%+ speedup on king moves (most common refresh scenario)
+
+---
+
+## Finny Tables (Phase 1.2) - Implementation Summary
+
+### What Was Implemented
+
+- `AccumulatorCacheEntry<SIZE>`: Cached state per (king_square, perspective)
+- `AccumulatorCache<SIZE>`: 64 entries × 2 perspectives
+- `FinnyTables`: Wrapper for big (3072) and small (128) networks
+- `try_refresh()`: Attempt fast refresh from cache
+- `update_cache()`: Update cache after full refresh
+
+### How It Works
+
+1. **Initialization**: Cache entries cleared with biases (no pieces)
+2. **On King Move**: 
+   - Try `try_refresh()` - if cache is valid and diff ≤ 4 pieces
+   - Copy cached accumulator + apply piece differences
+   - Much faster than full refresh
+3. **On Full Refresh**: Update cache with new state
+
+### Current Limitations
+
+- `MAX_DIFF_PIECES = 4` - only works for small changes
+- Cache invalidation not fully utilized
+- Does NOT pre-compute per-king-square states at init (Stockfish does this)
+
+### Stockfish's Better Approach
+
+Stockfish pre-populates cache at initialization:
+- For each king square: compute accumulator with ALL pieces
+- Store in cache entry
+- On king move: copy from cache (already computed!)
+
+**This is the BIGGEST missing optimization** - we compute from biases each time.
 
 ---
 
@@ -428,11 +246,10 @@ thread_local! {
 ### Key Stockfish Files for Reference
 - `archive/nnue/Stockfish-sf_17.1/src/nnue/nnue_common.h` - Constants (CacheLineSize=64)
 - `archive/nnue/Stockfish-sf_17.1/src/nnue/nnue_accumulator.h` - Accumulator + Cache
-- `archive/nnue/Stockfish-sf_17.1/src/nnue/nnue_accumulator.cpp` - Implementation (line 122-192 for forward/backward updates)
-- `archive/nnue/Stockfish-sf_17.1/src/nnue/nnue_feature_transformer.h` - Feature transformer + permutation (lines 289-319)
-- `archive/nnue/Stockfish-sf_17.1/src/nnue/layers/affine_transform.h` - MLP layers with VNNI (lines 153-239)
+- `archive/nnue/Stockfish-sf_17.1/src/nnue/nnue_accumulator.cpp` - Implementation (line 266-318 for SIMD update)
+- `archive/nnue/Stockfish-sf_17.1/src/nnue/nnue_feature_transformer.h` - Feature transformer + permutation
+- `archive/nnue/Stockfish-sf_17.1/src/nnue/layers/affine_transform.h` - MLP layers with VNNI
 - `archive/nnue/Stockfish-sf_17.1/src/nnue/layers/simd.h` - SIMD definitions (lines 68-77 for VNNI)
-- `archive/nnue/Stockfish-sf_17.1/src/nnue/network.h` - Network structure
 
 ### Memory Alignment Requirements
 - All SIMD data: 64-byte aligned
