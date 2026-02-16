@@ -138,7 +138,7 @@ impl<const SIZE: usize> Accumulator<SIZE> {
         }
     }
 
-    fn add_feature(&mut self, perspective: usize, feature_idx: usize, ft: &FeatureTransformer) {
+    pub fn add_feature(&mut self, perspective: usize, feature_idx: usize, ft: &FeatureTransformer) {
         let half_dims = ft.half_dims;
         let offset = feature_idx * half_dims;
         let w_slice = &ft.weights[offset..offset + half_dims];

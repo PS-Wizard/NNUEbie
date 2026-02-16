@@ -167,6 +167,77 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
         }
     }
 
+    /// Pre-populate all 64 king square entries for a given position
+    /// For each king square, compute the accumulator for that king position with all pieces
+    pub fn prepopulate(
+        &mut self,
+        pieces: &[(usize, usize)],
+        ft: &crate::feature_transformer::FeatureTransformer,
+        _king_squares: [usize; 2],
+    ) {
+        for king_sq in 0..64 {
+            // Compute accumulator for each king square
+            let mut acc = crate::accumulator::Accumulator::<SIZE>::new();
+
+            // Initialize with biases
+            acc.accumulation[0].copy_from_slice(&ft.biases);
+            acc.accumulation[1].copy_from_slice(&ft.biases);
+            acc.psqt_accumulation[0].fill(0);
+            acc.psqt_accumulation[1].fill(0);
+
+            // Add features for this king square
+            let ksq = [king_sq, king_sq]; // Both perspectives use same king square
+
+            for &(sq, pc) in pieces {
+                let idx_w = crate::features::make_index(
+                    crate::features::WHITE,
+                    sq,
+                    pc,
+                    ksq[crate::features::WHITE],
+                );
+                acc.add_feature(crate::features::WHITE, idx_w, ft);
+
+                let idx_b = crate::features::make_index(
+                    crate::features::BLACK,
+                    sq,
+                    pc,
+                    ksq[crate::features::BLACK],
+                );
+                acc.add_feature(crate::features::BLACK, idx_b, ft);
+            }
+
+            // Store in cache for both perspectives
+            for perspective in 0..2 {
+                let entry = &mut self.entries[king_sq][perspective];
+                entry
+                    .accumulation
+                    .copy_from_slice(&acc.accumulation[perspective]);
+                entry.psqt_accumulation = acc.psqt_accumulation[perspective];
+                entry.valid = true;
+
+                // Compute bitboards for this entry
+                entry.by_color_bb.fill(0);
+                entry.by_type_bb.fill(0);
+
+                for &(sq, pc) in pieces {
+                    let color = pc / 8;
+                    entry.by_color_bb[color] |= 1u64 << sq;
+
+                    let piece_type = match pc % 8 {
+                        1 => 0,
+                        2 => 1,
+                        3 => 2,
+                        4 => 3,
+                        5 => 4,
+                        6 => 5,
+                        _ => continue,
+                    };
+                    entry.by_type_bb[piece_type] |= 1u64 << sq;
+                }
+            }
+        }
+    }
+
     pub fn try_refresh(
         &mut self,
         accumulator: &mut Accumulator<SIZE>,
@@ -264,6 +335,19 @@ impl FinnyTables {
     pub fn clear(&mut self, biases_big: &[i16], biases_small: &[i16]) {
         self.cache_big.clear(biases_big);
         self.cache_small.clear(biases_small);
+    }
+
+    /// Pre-populate Finny Tables for all 64 king squares
+    /// Computes full accumulators for each king square × 2 perspectives = 128 entries
+    pub fn prepopulate(
+        &mut self,
+        pieces: &[(usize, usize)],
+        ft_big: &crate::feature_transformer::FeatureTransformer,
+        ft_small: &crate::feature_transformer::FeatureTransformer,
+        king_squares: [usize; 2],
+    ) {
+        self.cache_big.prepopulate(pieces, ft_big, king_squares);
+        self.cache_small.prepopulate(pieces, ft_small, king_squares);
     }
 }
 

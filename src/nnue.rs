@@ -61,6 +61,29 @@ impl NNUEProbe {
         }
 
         self.refresh_accumulators();
+
+        // Update cache with current position for future refreshes
+        self.update_cache_for_current_position();
+    }
+
+    /// Pre-populate Finny Tables with full accumulators for all 64 king squares
+    /// Call this after set_position for maximum cache efficiency on king moves
+    pub fn prepopulate_cache(&mut self) {
+        let mut pieces_idx: Vec<(usize, usize)> = Vec::with_capacity(self.piece_count);
+
+        for sq in 0..64 {
+            let p = self.pieces[sq];
+            if p != Piece::None {
+                pieces_idx.push((sq, p.index()));
+            }
+        }
+
+        self.finny_tables.prepopulate(
+            &pieces_idx,
+            &self.evaluator.networks.big_net.feature_transformer,
+            &self.evaluator.networks.small_net.feature_transformer,
+            self.king_squares,
+        );
     }
 
     fn add_piece_internal(&mut self, piece: Piece, square: Square) {
@@ -129,7 +152,7 @@ impl NNUEProbe {
         let mut dirty = DirtyPiece::new();
 
         let from_piece = self.pieces[from_sq];
-        let to_piece = self.pieces[to_sq]; // Captured piece, if any
+        let _to_piece = self.pieces[to_sq]; // Captured piece, if any
 
         // Remove piece from source
         self.remove_piece_internal(from_sq);
@@ -299,6 +322,29 @@ impl NNUEProbe {
                 self.king_squares,
             );
         }
+    }
+
+    /// Update cache with current position state
+    /// Call this after set_position to populate cache for current position
+    fn update_cache_for_current_position(&mut self) {
+        let mut pieces_idx: Vec<(usize, usize)> = Vec::with_capacity(self.piece_count);
+
+        for sq in 0..64 {
+            let p = self.pieces[sq];
+            if p != Piece::None {
+                pieces_idx.push((sq, p.index()));
+            }
+        }
+
+        let state = self.accumulator_stack.latest();
+        self.finny_tables
+            .cache_big
+            .update_cache(&state.acc_big, &pieces_idx, self.king_squares);
+        self.finny_tables.cache_small.update_cache(
+            &state.acc_small,
+            &pieces_idx,
+            self.king_squares,
+        );
     }
 
     pub fn evaluate(&mut self, side_to_move: Color) -> i32 {
