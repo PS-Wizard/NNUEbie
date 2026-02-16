@@ -59,7 +59,12 @@ impl Evaluator {
         }
     }
 
-    pub fn evaluate(&mut self, pieces: &[(usize, usize, usize)], side_to_move: usize) -> i32 {
+    pub fn evaluate(
+        &mut self,
+        pieces: &[(usize, usize, usize)],
+        side_to_move: usize,
+        rule50: i32,
+    ) -> i32 {
         // Calculate auxiliary info
         let mut pawn_count = [0; 2];
         let mut non_pawn_material = [0; 2];
@@ -178,10 +183,10 @@ impl Evaluator {
 
         let optimism = 0; // Default
 
-        let v = (nnue_val * (77777 + material) + optimism * (7777 + material)) / 77777;
+        let mut v = (nnue_val * (77777 + material) + optimism * (7777 + material)) / 77777;
 
-        // Rule50 dampening omitted (assume rule50 = 0)
-        // v -= v * rule50 / 212;
+        // Damp down the evaluation linearly when shuffling
+        v -= v * rule50 / 212;
 
         // Clamp to TB win/loss range
         v.clamp(-31753, 31753)

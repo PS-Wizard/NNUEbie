@@ -54,7 +54,7 @@ fn main() {
     ];
 
     // Set initial position
-    probe.set_position(&pieces);
+    probe.set_position(&pieces, 0);
 
     // Warmup
     for _ in 0..100 {
@@ -67,7 +67,7 @@ fn main() {
     // Benchmark Full Refresh
     let start = Instant::now();
     for _ in 0..iterations {
-        probe.set_position(&pieces);
+        probe.set_position(&pieces, 0);
         std::hint::black_box(probe.evaluate(Color::White));
     }
     let duration = start.elapsed();
@@ -78,7 +78,7 @@ fn main() {
     println!("\nBenchmarking Incremental Update...");
 
     // Reset to initial position
-    probe.set_position(&pieces);
+    probe.set_position(&pieces, 0);
 
     let iterations_inc = 10_000_000;
 
@@ -86,10 +86,10 @@ fn main() {
     for i in 0..iterations_inc {
         if i % 2 == 0 {
             // Move pawn e2 -> e4
-            probe.update(&[(Piece::WhitePawn, 12)], &[(Piece::WhitePawn, 28)]);
+            probe.make_move(12, 28, Piece::WhitePawn);
         } else {
-            // Move pawn e4 -> e2 (undo)
-            probe.update(&[(Piece::WhitePawn, 28)], &[(Piece::WhitePawn, 12)]);
+            // Undo move e2 -> e4
+            probe.unmake_move(12, 28, Piece::WhitePawn, None);
         }
         std::hint::black_box(probe.evaluate(Color::White));
     }

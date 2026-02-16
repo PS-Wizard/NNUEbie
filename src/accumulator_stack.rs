@@ -188,61 +188,82 @@ impl AccumulatorStack {
         // 2. Apply this state's dirty_piece
         for i in (last_computed_idx + 1)..current_idx {
             // Build change lists from dirty_piece for state[i]
-            let mut removed: Vec<(usize, usize)> = Vec::with_capacity(3);
-            let mut added: Vec<(usize, usize)> = Vec::with_capacity(3);
+            // Use stack-allocated arrays to avoid Vec allocations in hot path
+            let mut removed: [(usize, usize); 3] = [(0, 0); 3];
+            let mut added: [(usize, usize); 3] = [(0, 0); 3];
+            let mut removed_count = 0;
+            let mut added_count = 0;
 
             for j in 0..self.stack[i].dirty_piece.dirty_num {
-                removed.push((
+                removed[removed_count] = (
                     self.stack[i].dirty_piece.from[j],
                     self.stack[i].dirty_piece.piece_from[j],
-                ));
-                added.push((
+                );
+                removed_count += 1;
+
+                added[added_count] = (
                     self.stack[i].dirty_piece.to[j],
                     self.stack[i].dirty_piece.piece_to[j],
-                ));
+                );
+                added_count += 1;
             }
 
-            // Copy accumulation from state[i-1] to state[i] using raw pointers to avoid borrow issues
-            // We know i-1 and i are different indices, so no overlap
-            unsafe {
-                // Big network - perspective 0
-                let src = self.stack[i - 1].acc_big.accumulation[0].as_ptr();
-                let dst = self.stack[i].acc_big.accumulation[0].as_mut_ptr();
-                std::ptr::copy_nonoverlapping(src, dst, 3072);
+            let removed_slice = &removed[..removed_count];
+            let added_slice = &added[..added_count];
 
-                // Big network - perspective 1
-                let src = self.stack[i - 1].acc_big.accumulation[1].as_ptr();
-                let dst = self.stack[i].acc_big.accumulation[1].as_mut_ptr();
-                std::ptr::copy_nonoverlapping(src, dst, 3072);
+            // We need to borrow self.stack[i] and self.stack[i-1] mutably and immutably respectively.
+            // Since we can't borrow self twice, we use indices or split_at_mut, but they are adjacent in Vec.
+            // Easiest is to use raw pointers or just iterate with indices and careful borrowing.
+            // Or simple safe Rust: split_at_mut
 
-                // Small network - perspective 0
-                let src = self.stack[i - 1].acc_small.accumulation[0].as_ptr();
-                let dst = self.stack[i].acc_small.accumulation[0].as_mut_ptr();
-                std::ptr::copy_nonoverlapping(src, dst, 128);
+            let (left, right) = self.stack.split_at_mut(i);
+            let prev_state = &left[i - 1];
+            let curr_state = &mut right[0];
 
-                // Small network - perspective 1
-                let src = self.stack[i - 1].acc_small.accumulation[1].as_ptr();
-                let dst = self.stack[i].acc_small.accumulation[1].as_mut_ptr();
-                std::ptr::copy_nonoverlapping(src, dst, 128);
-            }
+            // Apply incremental updates using single-pass update (copy+update)
+            // This eliminates the explicit memcpy + add + remove overhead
 
-            // Copy PSQT (safe because these are arrays, not slices)
-            self.stack[i].acc_big.psqt_accumulation = self.stack[i - 1].acc_big.psqt_accumulation;
-            self.stack[i].acc_small.psqt_accumulation =
-                self.stack[i - 1].acc_small.psqt_accumulation;
-
-            // Apply incremental updates
-            if !removed.is_empty() || !added.is_empty() {
-                self.stack[i]
-                    .acc_big
-                    .update_with_ksq(&added, &removed, king_squares, ft_big);
-                self.stack[i]
-                    .acc_small
-                    .update_with_ksq(&added, &removed, king_squares, ft_small);
+            if !removed_slice.is_empty() || !added_slice.is_empty() {
+                curr_state.acc_big.update_incremental(
+                    &prev_state.acc_big,
+                    added_slice,
+                    removed_slice,
+                    king_squares,
+                    ft_big,
+                );
+                curr_state.acc_small.update_incremental(
+                    &prev_state.acc_small,
+                    added_slice,
+                    removed_slice,
+                    king_squares,
+                    ft_small,
+                );
+            } else {
+                // No changes (null move?), just copy
+                // Although null move usually still changes side to move, but here we track pieces.
+                // If dirty_num is 0, it means no pieces moved/captured.
+                // We still need to copy accumulator.
+                // We can use update_incremental with empty lists, which will just copy.
+                curr_state.acc_big.update_incremental(
+                    &prev_state.acc_big,
+                    &[],
+                    &[],
+                    king_squares,
+                    ft_big,
+                );
+                curr_state.acc_small.update_incremental(
+                    &prev_state.acc_small,
+                    &[],
+                    &[],
+                    king_squares,
+                    ft_small,
+                );
             }
 
             // Mark as computed
-            self.stack[i].computed = [true, true];
+            // This is actually done inside update_incremental now, but we can double check
+            debug_assert!(curr_state.acc_big.computed == [true, true]);
+            curr_state.computed = [true, true];
         }
     }
 
@@ -257,11 +278,13 @@ impl AccumulatorStack {
         self.stack[idx].acc_big.accumulation[0].copy_from_slice(&*ft_big.biases);
         self.stack[idx].acc_big.accumulation[1].copy_from_slice(&*ft_big.biases);
         self.stack[idx].acc_big.psqt_accumulation.fill([0; 8]);
+        self.stack[idx].acc_big.computed = [true, true];
 
         // Initialize small network with biases
         self.stack[idx].acc_small.accumulation[0].copy_from_slice(&*ft_small.biases);
         self.stack[idx].acc_small.accumulation[1].copy_from_slice(&*ft_small.biases);
         self.stack[idx].acc_small.psqt_accumulation.fill([0; 8]);
+        self.stack[idx].acc_small.computed = [true, true];
 
         self.stack[idx].computed = [true, true];
     }

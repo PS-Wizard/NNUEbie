@@ -2,10 +2,12 @@ use nnuebie::uci::{calculate_material, to_centipawns};
 use nnuebie::{Evaluator, NnueNetworks, BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
 use std::sync::Arc;
 
-fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize) {
+fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize, i32) {
     let parts: Vec<&str> = fen.split_whitespace().collect();
     let board_str = parts[0];
     let side_str = parts[1];
+    let rule50_str = if parts.len() > 4 { parts[4] } else { "0" };
+    let rule50: i32 = rule50_str.parse().unwrap_or(0);
 
     let mut pieces = Vec::new();
     let mut rank = 7;
@@ -35,7 +37,7 @@ fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize) {
     }
 
     let side = if side_str == "w" { WHITE } else { BLACK };
-    (pieces, side)
+    (pieces, side, rule50)
 }
 
 fn main() {
@@ -88,8 +90,8 @@ fn main() {
     ];
 
     for (name, fen, expected_cp) in test_cases {
-        let (pieces, side) = parse_fen(fen);
-        let score_internal = eval.evaluate(&pieces, side);
+        let (pieces, side, rule50) = parse_fen(fen);
+        let score_internal = eval.evaluate(&pieces, side, rule50);
         let material = calculate_material(&pieces);
         let score_cp = to_centipawns(score_internal, material);
 
@@ -99,13 +101,14 @@ fn main() {
         println!("Position: {}", name);
         println!("FEN: {}", fen);
         println!("Material Factor (Count): {}", material);
+        println!("Rule50: {}", rule50);
         println!("Internal Score: {} (Side to move)", score_internal);
         println!("Centipawn Score: {} (Side to move)", score_cp);
         println!("Centipawn Score: {} (White side)", score_cp_white);
         println!("Expected CP: {} (White side)", expected_cp);
 
         let diff = (score_cp_white - expected_cp).abs();
-        if diff <= 2 {
+        if diff <= 0 {
             println!("Result: PASS (Diff {})", diff);
         } else {
             println!("Result: FAIL (Diff {})", diff);
