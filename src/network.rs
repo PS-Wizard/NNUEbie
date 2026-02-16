@@ -108,6 +108,7 @@ impl Network {
             // fc_0
             let mut fc_0_layer = AffineTransform::new(half_dims, l2 + 1);
             fc_0_layer.read_parameters(&mut reader)?;
+            permute_fc_weights(&mut fc_0_layer);
 
             // fc_1
             let mut fc_1_layer = AffineTransform::new(l2 * 2, l3);
@@ -195,34 +196,52 @@ impl Network {
             let offset = (half_dims / 2) * p;
             let acc_ptr = accumulator.accumulation[perspective].as_ptr();
 
-            let chunk_size = 16;
+            // Stockfish-style optimization:
+            // Process 32 output elements (one AVX2 register) per iteration.
+            // This consumes 64 input elements (4 AVX2 registers) per perspective.
+            let chunk_size = 32;
             let n = (half_dims / 2) / chunk_size * chunk_size;
 
+            // Constants: max=0, min=127*2=254. Weights were scaled by 2 at load time.
+            let min = _mm256_set1_epi16(254);
+            let max = _mm256_setzero_si256();
+
             for j in (0..n).step_by(chunk_size) {
-                // Aligned loads from accumulator (AlignedBuffer)
-                let v0 = _mm256_load_si256(acc_ptr.add(j) as *const _);
-                let v1 = _mm256_load_si256(acc_ptr.add(j + half_dims / 2) as *const _);
+                // Load 32 elements for 'us' (in two 16-element vectors)
+                // Access pattern corresponds to Stockfish's in0[j*2] and in0[j*2+1]
+                let v0a = _mm256_load_si256(acc_ptr.add(j) as *const _);
+                let v0b = _mm256_load_si256(acc_ptr.add(j + 16) as *const _);
 
-                let min = _mm256_set1_epi16(254);
-                let max = _mm256_setzero_si256();
+                // Load 32 elements for 'them'
+                let offset_high = half_dims / 2;
+                let v1a = _mm256_load_si256(acc_ptr.add(offset_high + j) as *const _);
+                let v1b = _mm256_load_si256(acc_ptr.add(offset_high + j + 16) as *const _);
 
-                let v0_c = _mm256_max_epi16(max, _mm256_min_epi16(min, v0));
-                let v1_c = _mm256_max_epi16(max, _mm256_min_epi16(min, v1));
+                // Asymmetric clipping:
+                // v0 (first op): Full clip [0, 254]
+                let v0a_c = _mm256_max_epi16(max, _mm256_min_epi16(min, v0a));
+                let v0b_c = _mm256_max_epi16(max, _mm256_min_epi16(min, v0b));
 
-                // Stockfish optimization: shift first operand left by 7, then mulhi
-                // This gives: (v0_c << 7) * v1_c >> 16 = v0_c * v1_c / 512
-                let v0_s = _mm256_slli_epi16(v0_c, 7);
-                let prod = _mm256_mulhi_epi16(v0_s, v1_c);
+                // v1 (second op): Min-only clip (-inf, 254].
+                // Negative values are handled implicitly by packus later.
+                let v1a_c = _mm256_min_epi16(min, v1a);
+                let v1b_c = _mm256_min_epi16(min, v1b);
 
-                let lo = _mm256_castsi256_si128(prod);
-                let hi = _mm256_extracti128_si256(prod, 1);
+                // Multiply: (x * y) / 512
+                // Shift left 7, then mulhi (>> 16) results in net >> 9.
+                let sum0a = _mm256_slli_epi16(v0a_c, 7);
+                let sum0b = _mm256_slli_epi16(v0b_c, 7);
 
-                let packed = _mm_packus_epi16(lo, hi);
+                let pa = _mm256_mulhi_epi16(sum0a, v1a_c);
+                let pb = _mm256_mulhi_epi16(sum0b, v1b_c);
 
-                // Aligned store to output (AlignedBuffer)
-                _mm_store_si128(output_ptr.add(offset + j) as *mut _, packed);
+                // Packus combines 2 vectors and clips negatives to 0
+                let packed = _mm256_packus_epi16(pa, pb);
+
+                _mm256_store_si256(output_ptr.add(offset + j) as *mut _, packed);
             }
 
+            // Scalar fallback for remainder
             for j in n..(half_dims / 2) {
                 let sum0 = accumulator.accumulation[perspective][j].clamp(0, 127 * 2) as i32;
                 let sum1 = accumulator.accumulation[perspective][j + half_dims / 2]
@@ -279,4 +298,55 @@ impl Network {
 
         (psqt / OUTPUT_SCALE, positional / OUTPUT_SCALE)
     }
+}
+
+fn get_permutation_map(dims: usize) -> Vec<usize> {
+    let mut map = vec![0; dims];
+    for i in 0..dims {
+        let c = i / 32;
+        let byte = i % 32;
+        let k = c / 2;
+        let r = c % 2;
+
+        let (block_a, block_b) = if r == 0 {
+            (4 * k, 4 * k + 2)
+        } else {
+            (4 * k + 1, 4 * k + 3)
+        };
+
+        // Map output byte index to original feature index
+        let feature_idx = if byte < 8 {
+            block_a * 16 + byte
+        } else if byte < 16 {
+            block_b * 16 + (byte - 8)
+        } else if byte < 24 {
+            block_a * 16 + (byte - 16) + 8
+        } else {
+            block_b * 16 + (byte - 24) + 8
+        };
+        map[i] = feature_idx;
+    }
+    map
+}
+
+fn permute_fc_weights(layer: &mut AffineTransform) {
+    let map = get_permutation_map(layer.input_dims);
+    let rows = layer.output_dims;
+    let cols = layer.padded_input_dims;
+
+    let mut new_weights = vec![0i8; layer.weights.len()];
+    let old_weights = &layer.weights;
+
+    for r in 0..rows {
+        let row_offset = r * cols;
+        for c in 0..layer.input_dims {
+            new_weights[row_offset + c] = old_weights[row_offset + map[c]];
+        }
+        // Copy padding if any
+        for c in layer.input_dims..cols {
+            new_weights[row_offset + c] = old_weights[row_offset + c];
+        }
+    }
+
+    layer.weights = AlignedBuffer::from_vec(new_weights);
 }

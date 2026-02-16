@@ -134,15 +134,11 @@ impl NNUEProbe {
         // Remove piece from source
         self.remove_piece_internal(from_sq);
 
-        // Remove captured piece from destination (if any)
-        if to_piece != Piece::None {
-            dirty.add_change(to_sq, to_sq, to_piece.index(), 0);
-        }
-
-        // Add piece to destination
+        // Add piece to destination (this overwrites any captured piece)
         self.add_piece_internal(piece, to_sq);
 
-        // Record the move
+        // Record the move - this handles both normal moves and captures
+        // For captures: remove from from_sq, add to to_sq (overwriting captured)
         dirty.add_change(from_sq, to_sq, from_piece.index(), piece.index());
 
         // Push onto stack

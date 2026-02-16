@@ -48,12 +48,17 @@ fn main() {
     let mut eval = Evaluator::new(networks);
 
     // Expected values from Stockfish "eval" command output (Final evaluation, White side)
-    // Tolerance is ±2 cp
+    // Tolerance is 0
     let test_cases = vec![
         (
             "Startpos",
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
             7,
+        ),
+        (
+            "King Triggers Refresh",
+            "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+            -20,
         ),
         (
             "e4",

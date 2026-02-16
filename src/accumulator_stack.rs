@@ -154,16 +154,20 @@ impl AccumulatorStack {
     }
 
     /// Incrementally update accumulators from the previous state
+    ///
+    /// This finds the last computed state and copies its accumulator data,
+    /// then applies incremental updates on top of it.
     pub fn update_incremental(
         &mut self,
         king_squares: [usize; 2],
         ft_big: &FeatureTransformer,
         ft_small: &FeatureTransformer,
     ) {
-        // Find the last state with computed accumulators BEFORE mutably borrowing
-        // This is the Stockfish approach - lazily find the last usable state
+        // Find the last computed state BEFORE mutably borrowing
         let current_idx = self.current_idx;
         let mut last_computed_idx = current_idx - 1;
+
+        // Search backward for a computed state
         while last_computed_idx > 0 {
             if self.stack[last_computed_idx].computed == [true, true] {
                 break;
@@ -171,22 +175,24 @@ impl AccumulatorStack {
             last_computed_idx -= 1;
         }
 
-        // If we found a computed state, copy its accumulator data to the current state
-        // This is needed because we no longer clone on push()
-        // Note: last_computed_idx can be 0 (root position is valid)
-        let source_accum: Option<(
-            Vec<i16>,
-            Vec<i16>,
-            [[i32; 8]; 2],
-            Vec<i16>,
-            Vec<i16>,
-            [[i32; 8]; 2],
-        )> = if self.stack[last_computed_idx].computed == [true, true] {
+        // Get source data if we found a computed state
+        let has_computed = self.stack[last_computed_idx].computed == [true, true];
+
+        // Copy data before mutable borrow
+        let source_big: Option<(Vec<i16>, Vec<i16>, [[i32; 8]; 2])> = if has_computed {
             let source = &self.stack[last_computed_idx];
             Some((
                 source.acc_big.accumulation[0].as_slice().to_vec(),
                 source.acc_big.accumulation[1].as_slice().to_vec(),
                 source.acc_big.psqt_accumulation,
+            ))
+        } else {
+            None
+        };
+
+        let source_small: Option<(Vec<i16>, Vec<i16>, [[i32; 8]; 2])> = if has_computed {
+            let source = &self.stack[last_computed_idx];
+            Some((
                 source.acc_small.accumulation[0].as_slice().to_vec(),
                 source.acc_small.accumulation[1].as_slice().to_vec(),
                 source.acc_small.psqt_accumulation,
@@ -197,24 +203,41 @@ impl AccumulatorStack {
 
         let current = self.mut_latest();
 
-        // Copy accumulator data from source if we found one, otherwise initialize with biases
-        if let Some((ab0, ab1, ab_psqt, as0, as1, as_psqt)) = source_accum {
-            current.acc_big.accumulation[0].copy_from_slice(&ab0);
-            current.acc_big.accumulation[1].copy_from_slice(&ab1);
-            current.acc_big.psqt_accumulation.copy_from_slice(&ab_psqt);
-            current.acc_small.accumulation[0].copy_from_slice(&as0);
-            current.acc_small.accumulation[1].copy_from_slice(&as1);
-            current
-                .acc_small
-                .psqt_accumulation
-                .copy_from_slice(&as_psqt);
+        // Initialize from source or biases
+        if let Some((ab0, ab1, ab_psqt)) = source_big {
+            current.acc_big.accumulation[0]
+                .as_mut_slice()
+                .copy_from_slice(&ab0);
+            current.acc_big.accumulation[1]
+                .as_mut_slice()
+                .copy_from_slice(&ab1);
+            current.acc_big.psqt_accumulation = ab_psqt;
         } else {
-            // Initialize with biases (full refresh case)
-            current.acc_big.accumulation[0].copy_from_slice(&*ft_big.biases);
-            current.acc_big.accumulation[1].copy_from_slice(&*ft_big.biases);
+            // Initialize with biases
+            current.acc_big.accumulation[0]
+                .as_mut_slice()
+                .copy_from_slice(&*ft_big.biases);
+            current.acc_big.accumulation[1]
+                .as_mut_slice()
+                .copy_from_slice(&*ft_big.biases);
             current.acc_big.psqt_accumulation.fill([0; 8]);
-            current.acc_small.accumulation[0].copy_from_slice(&*ft_small.biases);
-            current.acc_small.accumulation[1].copy_from_slice(&*ft_small.biases);
+        }
+
+        if let Some((as0, as1, as_psqt)) = source_small {
+            current.acc_small.accumulation[0]
+                .as_mut_slice()
+                .copy_from_slice(&as0);
+            current.acc_small.accumulation[1]
+                .as_mut_slice()
+                .copy_from_slice(&as1);
+            current.acc_small.psqt_accumulation = as_psqt;
+        } else {
+            current.acc_small.accumulation[0]
+                .as_mut_slice()
+                .copy_from_slice(&*ft_small.biases);
+            current.acc_small.accumulation[1]
+                .as_mut_slice()
+                .copy_from_slice(&*ft_small.biases);
             current.acc_small.psqt_accumulation.fill([0; 8]);
         }
 
@@ -223,7 +246,6 @@ impl AccumulatorStack {
         let mut added: Vec<(usize, usize)> = Vec::with_capacity(3);
 
         for i in 0..current.dirty_piece.dirty_num {
-            // Piece moved from -> to
             removed.push((
                 current.dirty_piece.from[i],
                 current.dirty_piece.piece_from[i],
@@ -231,7 +253,7 @@ impl AccumulatorStack {
             added.push((current.dirty_piece.to[i], current.dirty_piece.piece_to[i]));
         }
 
-        // Update both networks incrementally
+        // Apply incremental updates
         current
             .acc_big
             .update_with_ksq(&added, &removed, king_squares, ft_big);
