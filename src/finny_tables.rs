@@ -2,7 +2,8 @@ use crate::accumulator::Accumulator;
 use crate::aligned::AlignedBuffer;
 use crate::feature_transformer::FeatureTransformer;
 
-const PSQT_BUCKETS: usize = 8;
+use crate::feature_transformer::PSQT_BUCKETS;
+
 const MAX_DIFF_PIECES: usize = 4;
 
 #[derive(Clone, Copy)]
