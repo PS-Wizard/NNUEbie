@@ -11,6 +11,26 @@ use std::arch::x86_64::*;
 
 pub const LAYER_STACKS: usize = 8;
 
+// Piece values for evaluation
+pub const PAWN_VALUE: i32 = 208;
+pub const KNIGHT_VALUE: i32 = 781;
+pub const BISHOP_VALUE: i32 = 825;
+pub const ROOK_VALUE: i32 = 1276;
+pub const QUEEN_VALUE: i32 = 2538;
+
+pub struct NnueNetworks {
+    pub big_net: Network,
+    pub small_net: Network,
+}
+
+impl NnueNetworks {
+    pub fn new(big_path: &str, small_path: &str) -> io::Result<Self> {
+        let big_net = Network::load(big_path, true)?;
+        let small_net = Network::load(small_path, false)?;
+        Ok(Self { big_net, small_net })
+    }
+}
+
 pub struct Network {
     pub feature_transformer: FeatureTransformer,
     pub fc_0: Vec<AffineTransform>,

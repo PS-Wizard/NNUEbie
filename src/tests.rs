@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::evaluator::{Evaluator, NnueNetworks};
-    use crate::features::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
+    use crate::network::NnueNetworks;
     use crate::nnue::NNUEProbe;
     use crate::types::{Color, Piece};
     use crate::uci::{calculate_material, to_centipawns};
@@ -109,64 +108,6 @@ mod tests {
             -cp
         } else {
             cp
-        }
-    }
-
-    #[test]
-    fn test_starting_position_eval() {
-        let networks =
-            Arc::new(NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks"));
-        let mut eval = Evaluator::new(networks);
-
-        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-        let (pieces, side) = parse_fen(fen);
-
-        let internal = eval.evaluate(&pieces, side, 0);
-        let material = calculate_material(&pieces);
-        let cp = to_centipawns(internal, material);
-        let white_cp = if side == BLACK { -cp } else { cp };
-
-        println!("Startpos: {} cp (white perspective)", white_cp);
-        assert!(white_cp.abs() < 50, "Start should be near 0");
-    }
-
-    #[test]
-    fn test_fen_eval_known_positions() {
-        let networks =
-            Arc::new(NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("load networks"));
-        let mut eval = Evaluator::new(networks);
-
-        let cases = vec![
-            (
-                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                "Startpos",
-                7,
-            ),
-            (
-                "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-                "e4",
-                37,
-            ),
-            (
-                "r1bqkb1r/pppp1ppp/2n2n2/3Pp3/4P3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 1",
-                "QGA",
-                113,
-            ),
-        ];
-
-        for (fen, name, expected) in cases {
-            let (pieces, side) = parse_fen(fen);
-            let internal = eval.evaluate(&pieces, side, 0);
-            let material = calculate_material(&pieces);
-            let cp = to_centipawns(internal, material);
-            let white_cp = if side == BLACK { -cp } else { cp };
-
-            let diff = (white_cp - expected).abs();
-            println!(
-                "{}: expected={}, got={}cp, diff={}",
-                name, expected, white_cp, diff
-            );
-            assert!(diff == 0, "{} off by {} cp", name, diff);
         }
     }
 

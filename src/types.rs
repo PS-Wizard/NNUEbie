@@ -15,6 +15,13 @@ impl Color {
     pub fn index(&self) -> usize {
         *self as usize
     }
+
+    pub fn from_index(idx: usize) -> Self {
+        match idx {
+            0 => Color::White,
+            _ => Color::Black,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

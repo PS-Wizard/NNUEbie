@@ -1,8 +1,8 @@
+use nnuebie::types::Piece;
 use nnuebie::uci::{calculate_material, to_centipawns};
-use nnuebie::{Evaluator, NnueNetworks, BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
-use std::sync::Arc;
+use nnuebie::{NNUEProbe, BLACK, WHITE};
 
-fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize, i32) {
+fn parse_fen(fen: &str) -> (Vec<(Piece, usize)>, usize, i32) {
     let parts: Vec<&str> = fen.split_whitespace().collect();
     let board_str = parts[0];
     let side_str = parts[1];
@@ -20,18 +20,23 @@ fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize, i32) {
         } else if c.is_digit(10) {
             file += c.to_digit(10).unwrap() as usize;
         } else {
-            let color = if c.is_uppercase() { WHITE } else { BLACK };
-            let pt = match c.to_ascii_lowercase() {
-                'p' => PAWN,
-                'n' => KNIGHT,
-                'b' => BISHOP,
-                'r' => ROOK,
-                'q' => QUEEN,
-                'k' => KING,
+            let piece = match (c.is_uppercase(), c.to_ascii_lowercase()) {
+                (true, 'p') => Piece::WhitePawn,
+                (true, 'n') => Piece::WhiteKnight,
+                (true, 'b') => Piece::WhiteBishop,
+                (true, 'r') => Piece::WhiteRook,
+                (true, 'q') => Piece::WhiteQueen,
+                (true, 'k') => Piece::WhiteKing,
+                (false, 'p') => Piece::BlackPawn,
+                (false, 'n') => Piece::BlackKnight,
+                (false, 'b') => Piece::BlackBishop,
+                (false, 'r') => Piece::BlackRook,
+                (false, 'q') => Piece::BlackQueen,
+                (false, 'k') => Piece::BlackKing,
                 _ => panic!("Invalid piece char: {}", c),
             };
             let sq = rank * 8 + file;
-            pieces.push((sq, pt, color));
+            pieces.push((piece, sq));
             file += 1;
         }
     }
@@ -45,9 +50,7 @@ fn main() {
     let small_path = "archive/nnue/networks/nn-37f18f62d772.nnue";
 
     println!("Loading networks...");
-    let networks =
-        Arc::new(NnueNetworks::new(big_path, small_path).expect("Failed to load networks"));
-    let mut eval = Evaluator::new(networks);
+    let mut probe = NNUEProbe::new(big_path, small_path).expect("Failed to load networks");
 
     // Expected values from Stockfish "eval" command output (Final evaluation, White side)
     // Tolerance is 0
@@ -91,8 +94,22 @@ fn main() {
 
     for (name, fen, expected_cp) in test_cases {
         let (pieces, side, rule50) = parse_fen(fen);
-        let score_internal = eval.evaluate(&pieces, side, rule50);
-        let material = calculate_material(&pieces);
+
+        // Convert to internal format for material calculation
+        let pieces_internal: Vec<(usize, usize, usize)> = pieces
+            .iter()
+            .map(|(p, sq)| {
+                (
+                    *sq,
+                    p.piece_type(),
+                    p.color().map(|c| c.index()).unwrap_or(0),
+                )
+            })
+            .collect();
+
+        probe.set_position(&pieces, rule50);
+        let score_internal = probe.evaluate(nnuebie::types::Color::from_index(side));
+        let material = calculate_material(&pieces_internal);
         let score_cp = to_centipawns(score_internal, material);
 
         // Convert to White perspective for comparison with Stockfish "white side" output

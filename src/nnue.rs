@@ -1,14 +1,16 @@
 use crate::accumulator_stack::{AccumulatorStack, DirtyPiece};
-use crate::evaluator::{
-    Evaluator, NnueNetworks, BISHOP_VALUE, KNIGHT_VALUE, PAWN_VALUE, QUEEN_VALUE, ROOK_VALUE,
-};
 use crate::finny_tables::FinnyTables;
+use crate::network::{
+    NnueNetworks, ScratchBuffer, BISHOP_VALUE, KNIGHT_VALUE, PAWN_VALUE, QUEEN_VALUE, ROOK_VALUE,
+};
 use crate::types::{Color, Piece, Square};
 use std::io;
 use std::sync::Arc;
 
 pub struct NNUEProbe {
-    evaluator: Evaluator,
+    networks: Arc<NnueNetworks>,
+    scratch_big: ScratchBuffer,
+    scratch_small: ScratchBuffer,
     pieces: [Piece; 64],
     king_squares: [Square; 2],
     piece_count: usize,
@@ -16,7 +18,6 @@ pub struct NNUEProbe {
     non_pawn_material: [i32; 2],
     accumulator_stack: AccumulatorStack,
     finny_tables: FinnyTables,
-    // rule50 field removed
 }
 
 impl NNUEProbe {
@@ -26,17 +27,21 @@ impl NNUEProbe {
     }
 
     pub fn with_networks(networks: Arc<NnueNetworks>) -> io::Result<Self> {
-        let evaluator = Evaluator::new(networks);
+        let scratch_big = ScratchBuffer::new(networks.big_net.feature_transformer.half_dims);
+        let scratch_small = ScratchBuffer::new(networks.small_net.feature_transformer.half_dims);
+
         let mut finny_tables = FinnyTables::new();
 
         // Initialize with biases
         finny_tables.clear(
-            &evaluator.networks.big_net.feature_transformer.biases,
-            &evaluator.networks.small_net.feature_transformer.biases,
+            &networks.big_net.feature_transformer.biases,
+            &networks.small_net.feature_transformer.biases,
         );
 
         Ok(Self {
-            evaluator,
+            networks,
+            scratch_big,
+            scratch_small,
             pieces: [Piece::None; 64],
             king_squares: [0; 2], // Default
             piece_count: 0,
@@ -84,8 +89,8 @@ impl NNUEProbe {
 
         self.finny_tables.prepopulate(
             &pieces_idx,
-            &self.evaluator.networks.big_net.feature_transformer,
-            &self.evaluator.networks.small_net.feature_transformer,
+            &self.networks.big_net.feature_transformer,
+            &self.networks.small_net.feature_transformer,
             self.king_squares,
         );
     }
@@ -195,8 +200,8 @@ impl NNUEProbe {
             // Incremental update
             self.accumulator_stack.update_incremental(
                 self.king_squares,
-                &self.evaluator.networks.big_net.feature_transformer,
-                &self.evaluator.networks.small_net.feature_transformer,
+                &self.networks.big_net.feature_transformer,
+                &self.networks.small_net.feature_transformer,
             );
         }
     }
@@ -262,13 +267,13 @@ impl NNUEProbe {
                 &added_mapped,
                 &removed_mapped,
                 self.king_squares,
-                &self.evaluator.networks.big_net.feature_transformer,
+                &self.networks.big_net.feature_transformer,
             );
             state.acc_small.update_with_ksq(
                 &added_mapped,
                 &removed_mapped,
                 self.king_squares,
-                &self.evaluator.networks.small_net.feature_transformer,
+                &self.networks.small_net.feature_transformer,
             );
         }
     }
@@ -286,8 +291,8 @@ impl NNUEProbe {
         self.accumulator_stack.refresh(
             &pieces_idx,
             self.king_squares,
-            &self.evaluator.networks.big_net.feature_transformer,
-            &self.evaluator.networks.small_net.feature_transformer,
+            &self.networks.big_net.feature_transformer,
+            &self.networks.small_net.feature_transformer,
         );
     }
 
@@ -311,7 +316,7 @@ impl NNUEProbe {
             &mut state.acc_big,
             &pieces_idx,
             self.king_squares,
-            &self.evaluator.networks.big_net.feature_transformer,
+            &self.networks.big_net.feature_transformer,
         );
 
         // Try to use Finny Tables for small network
@@ -319,7 +324,7 @@ impl NNUEProbe {
             &mut state.acc_small,
             &pieces_idx,
             self.king_squares,
-            &self.evaluator.networks.small_net.feature_transformer,
+            &self.networks.small_net.feature_transformer,
         );
 
         if !cache_used_big || !cache_used_small {
@@ -327,8 +332,8 @@ impl NNUEProbe {
             self.accumulator_stack.refresh(
                 &pieces_idx,
                 self.king_squares,
-                &self.evaluator.networks.big_net.feature_transformer,
-                &self.evaluator.networks.small_net.feature_transformer,
+                &self.networks.big_net.feature_transformer,
+                &self.networks.small_net.feature_transformer,
             );
 
             // Update cache with the new state
@@ -391,11 +396,11 @@ impl NNUEProbe {
         let latest_state = self.accumulator_stack.latest();
 
         if use_small {
-            let (psqt, pos) = self.evaluator.networks.small_net.evaluate(
+            let (psqt, pos) = self.networks.small_net.evaluate(
                 &latest_state.acc_small,
                 bucket,
                 stm,
-                &mut self.evaluator.scratch_small,
+                &mut self.scratch_small,
             );
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
@@ -403,11 +408,11 @@ impl NNUEProbe {
 
             if nnue_val.abs() < 236 {
                 // Use big network
-                let (psqt_b, pos_b) = self.evaluator.networks.big_net.evaluate(
+                let (psqt_b, pos_b) = self.networks.big_net.evaluate(
                     &latest_state.acc_big,
                     bucket,
                     stm,
-                    &mut self.evaluator.scratch_big,
+                    &mut self.scratch_big,
                 );
                 nnue_val = (125 * psqt_b + 131 * pos_b) / 128;
                 psqt_val = psqt_b;
@@ -415,11 +420,11 @@ impl NNUEProbe {
             }
         } else {
             // Use big network
-            let (psqt, pos) = self.evaluator.networks.big_net.evaluate(
+            let (psqt, pos) = self.networks.big_net.evaluate(
                 &latest_state.acc_big,
                 bucket,
                 stm,
-                &mut self.evaluator.scratch_big,
+                &mut self.scratch_big,
             );
             nnue_val = (125 * psqt + 131 * pos) / 128;
             psqt_val = psqt;
