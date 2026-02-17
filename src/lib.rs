@@ -24,10 +24,14 @@ pub use finny_tables::FinnyTables;
 pub use layers::Layer;
 pub use network::Network;
 pub use nnue::NNUEProbe;
+
+// Re-export types
 pub use types::{Color, Piece, Square};
 
+// Re-export common constants from features for compatibility
 pub use features::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
 
+// Constants
 pub const VERSION: u32 = 0x7AF32F20;
 
 // From nnue_common.h

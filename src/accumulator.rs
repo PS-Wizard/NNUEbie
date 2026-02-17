@@ -265,6 +265,43 @@ impl<const SIZE: usize> Accumulator<SIZE> {
         self.computed = [true, true];
     }
 
+    /// Apply changes to an external buffer (used for Cache updates)
+    pub fn apply_changes_to_buffer(
+        &self,
+        buffer: &mut [i16],
+        added: &[(usize, usize)],
+        removed: &[(usize, usize)],
+        ksq: [usize; 2],
+        ft: &FeatureTransformer,
+        perspective: usize,
+    ) {
+        debug_assert_eq!(
+            ft.half_dims, SIZE,
+            "FeatureTransformer dims mismatch Accumulator size"
+        );
+        debug_assert_eq!(buffer.len(), SIZE, "Buffer size mismatch");
+
+        // Remove features
+        for &(sq, pc) in removed {
+            let idx = make_index(perspective, sq, pc, ksq[perspective]);
+            let offset = idx * SIZE;
+            let w_slice = &ft.weights[offset..offset + SIZE];
+            unsafe {
+                (self.remove_feature_fn)(buffer, w_slice);
+            }
+        }
+
+        // Add features
+        for &(sq, pc) in added {
+            let idx = make_index(perspective, sq, pc, ksq[perspective]);
+            let offset = idx * SIZE;
+            let w_slice = &ft.weights[offset..offset + SIZE];
+            unsafe {
+                (self.add_feature_fn)(buffer, w_slice);
+            }
+        }
+    }
+
     /// Legacy update method (still needed for Finny Tables fallback etc)
     pub fn update_with_ksq(
         &mut self,

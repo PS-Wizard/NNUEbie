@@ -179,7 +179,11 @@ impl AccumulatorStack {
             last_computed_idx -= 1;
         }
 
-        let has_computed = self.stack[last_computed_idx].computed == [true, true];
+        let has_computed = self
+            .stack
+            .get(last_computed_idx)
+            .map(|s| s.computed == [true, true])
+            .unwrap_or(false);
 
         // If no computed state found, initialize the first state with biases
         if !has_computed {

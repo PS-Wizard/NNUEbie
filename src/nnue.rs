@@ -186,10 +186,11 @@ impl NNUEProbe {
         // Push onto stack
         self.accumulator_stack.push(&dirty, new_rule50);
 
-        // Update accumulators incrementally (unless king moved)
+        // Update accums incrementally (unless king moved)
+        // If king moved, try using Finny Tables cache for faster refresh
         if piece.is_king() {
-            // King moves - do a full refresh (Finny Tables cache not safe during make/unmake)
-            self.refresh_accumulators();
+            // King moves - try Finny Tables cache for faster refresh
+            self.refresh_with_cache();
         } else {
             // Incremental update
             self.accumulator_stack.update_incremental(

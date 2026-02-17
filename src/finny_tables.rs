@@ -46,7 +46,12 @@ impl<const SIZE: usize> AccumulatorCacheEntry<SIZE> {
         &self,
         pieces: &[(usize, usize)],
         _king_sq: usize,
-    ) -> Option<(Vec<PieceInfo>, Vec<PieceInfo>)> {
+    ) -> Option<(
+        [PieceInfo; MAX_DIFF_PIECES],
+        [PieceInfo; MAX_DIFF_PIECES],
+        usize,
+        usize,
+    )> {
         if !self.valid {
             return None;
         }
@@ -69,8 +74,16 @@ impl<const SIZE: usize> AccumulatorCacheEntry<SIZE> {
             current_type_bb[piece_type] |= 1u64 << sq;
         }
 
-        let mut removed = Vec::new();
-        let mut added = Vec::new();
+        let mut removed = [PieceInfo {
+            square: 0,
+            piece: 0,
+        }; MAX_DIFF_PIECES];
+        let mut added = [PieceInfo {
+            square: 0,
+            piece: 0,
+        }; MAX_DIFF_PIECES];
+        let mut removed_count = 0;
+        let mut added_count = 0;
 
         for color in 0..2 {
             let old_color = self.by_color_bb[color];
@@ -87,31 +100,33 @@ impl<const SIZE: usize> AccumulatorCacheEntry<SIZE> {
                 let pieces_added = to_add & new_type;
 
                 let mut bb = pieces_removed;
-                while bb != 0 {
+                while bb != 0 && removed_count < MAX_DIFF_PIECES {
                     let sq = bb.trailing_zeros() as usize;
-                    removed.push(PieceInfo {
+                    removed[removed_count] = PieceInfo {
                         square: sq,
                         piece: color * 8 + piece_type + 1,
-                    });
+                    };
+                    removed_count += 1;
                     bb &= bb - 1;
                 }
 
                 let mut bb = pieces_added;
-                while bb != 0 {
+                while bb != 0 && added_count < MAX_DIFF_PIECES {
                     let sq = bb.trailing_zeros() as usize;
-                    added.push(PieceInfo {
+                    added[added_count] = PieceInfo {
                         square: sq,
                         piece: color * 8 + piece_type + 1,
-                    });
+                    };
+                    added_count += 1;
                     bb &= bb - 1;
                 }
             }
         }
 
-        let diff_count = removed.len() + added.len();
+        let diff_count = removed_count + added_count;
 
         if diff_count <= MAX_DIFF_PIECES {
-            Some((removed, added))
+            Some((removed, added, removed_count, added_count))
         } else {
             None
         }
@@ -139,6 +154,21 @@ impl<const SIZE: usize> AccumulatorCacheEntry<SIZE> {
         } else {
             None
         }
+    }
+
+    /// Check if a king moved for a given perspective
+    /// Returns true if the moved piece is a king (piece == 6 for white, 14 for black)
+    pub fn requires_refresh(perspective: usize, piece_to: &[usize; 3], dirty_num: usize) -> bool {
+        for i in 0..dirty_num {
+            let piece = piece_to[i];
+            if perspective == 0 && piece == 6 {
+                return true;
+            }
+            if perspective == 1 && piece == 14 {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -253,17 +283,24 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
                 return false;
             }
 
-            if let Some((removed, added)) = entry.compute_diff(pieces, king_sq) {
-                let removed_slice: Vec<(usize, usize)> =
-                    removed.iter().map(|p| (p.square, p.piece)).collect();
-                let added_slice: Vec<(usize, usize)> =
-                    added.iter().map(|p| (p.square, p.piece)).collect();
+            if let Some((removed, added, removed_count, added_count)) =
+                entry.compute_diff(pieces, king_sq)
+            {
+                let mut removed_tuples: Vec<(usize, usize)> = Vec::with_capacity(removed_count);
+                let mut added_tuples: Vec<(usize, usize)> = Vec::with_capacity(added_count);
+
+                for i in 0..removed_count {
+                    removed_tuples.push((removed[i].square, removed[i].piece));
+                }
+                for i in 0..added_count {
+                    added_tuples.push((added[i].square, added[i].piece));
+                }
 
                 accumulator.accumulation[perspective].copy_from_slice(&*entry.accumulation);
                 accumulator.psqt_accumulation[perspective]
                     .copy_from_slice(&entry.psqt_accumulation);
 
-                accumulator.update_with_ksq(&added_slice, &removed_slice, king_squares, ft);
+                accumulator.update_with_ksq(&added_tuples, &removed_tuples, king_squares, ft);
             } else {
                 return false;
             }
@@ -309,6 +346,87 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
             }
 
             entry.valid = true;
+        }
+    }
+
+    /// In-place cache refresh - Stockfish style
+    /// Updates both the cache entry AND the accumulator in one pass
+    /// This is more efficient as it avoids an extra copy
+    pub fn refresh_in_place(
+        &mut self,
+        accumulator: &mut Accumulator<SIZE>,
+        pieces: &[(usize, usize)],
+        king_squares: [usize; 2],
+        ft: &FeatureTransformer,
+    ) {
+        for perspective in 0..2 {
+            let king_sq = king_squares[perspective];
+            let entry = &mut self.entries[king_sq][perspective];
+
+            if let Some((removed, added, removed_count, added_count)) =
+                entry.compute_diff(pieces, king_sq)
+            {
+                let mut removed_tuples: Vec<(usize, usize)> = Vec::with_capacity(removed_count);
+                let mut added_tuples: Vec<(usize, usize)> = Vec::with_capacity(added_count);
+
+                for i in 0..removed_count {
+                    removed_tuples.push((removed[i].square, removed[i].piece));
+                }
+                for i in 0..added_count {
+                    added_tuples.push((added[i].square, added[i].piece));
+                }
+
+                accumulator.apply_changes_to_buffer(
+                    &mut entry.accumulation.as_mut_slice()[..],
+                    &added_tuples,
+                    &removed_tuples,
+                    king_squares,
+                    ft,
+                    perspective,
+                );
+
+                for (i, &bucket) in entry.psqt_accumulation.iter().enumerate() {
+                    accumulator.psqt_accumulation[perspective][i] = bucket;
+                }
+
+                for &(_, pc) in &removed_tuples {
+                    let color = pc / 8;
+                    let piece_type = match pc % 8 {
+                        1 => 0,
+                        2 => 1,
+                        3 => 2,
+                        4 => 3,
+                        5 => 4,
+                        6 => 5,
+                        _ => continue,
+                    };
+                    let sq = removed_tuples
+                        .iter()
+                        .find(|&&(_s, p)| p == pc)
+                        .map(|(s, _)| *s)
+                        .unwrap_or(0);
+                    entry.by_color_bb[color] &= !(1u64 << sq);
+                    entry.by_type_bb[piece_type] &= !(1u64 << sq);
+                }
+                for &(sq, pc) in &added_tuples {
+                    let color = pc / 8;
+                    let piece_type = match pc % 8 {
+                        1 => 0,
+                        2 => 1,
+                        3 => 2,
+                        4 => 3,
+                        5 => 4,
+                        6 => 5,
+                        _ => continue,
+                    };
+                    entry.by_color_bb[color] |= 1u64 << sq;
+                    entry.by_type_bb[piece_type] |= 1u64 << sq;
+                }
+            }
+
+            accumulator.accumulation[perspective].copy_from_slice(&*entry.accumulation);
+            accumulator.psqt_accumulation[perspective].copy_from_slice(&entry.psqt_accumulation);
+            accumulator.computed[perspective] = true;
         }
     }
 }
