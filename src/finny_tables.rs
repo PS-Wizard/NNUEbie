@@ -286,21 +286,27 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
             if let Some((removed, added, removed_count, added_count)) =
                 entry.compute_diff(pieces, king_sq)
             {
-                let mut removed_tuples: Vec<(usize, usize)> = Vec::with_capacity(removed_count);
-                let mut added_tuples: Vec<(usize, usize)> = Vec::with_capacity(added_count);
+                let mut removed_tuples: [(usize, usize); MAX_DIFF_PIECES] =
+                    [(0, 0); MAX_DIFF_PIECES];
+                let mut added_tuples: [(usize, usize); MAX_DIFF_PIECES] = [(0, 0); MAX_DIFF_PIECES];
 
                 for i in 0..removed_count {
-                    removed_tuples.push((removed[i].square, removed[i].piece));
+                    removed_tuples[i] = (removed[i].square, removed[i].piece);
                 }
                 for i in 0..added_count {
-                    added_tuples.push((added[i].square, added[i].piece));
+                    added_tuples[i] = (added[i].square, added[i].piece);
                 }
 
                 accumulator.accumulation[perspective].copy_from_slice(&*entry.accumulation);
                 accumulator.psqt_accumulation[perspective]
                     .copy_from_slice(&entry.psqt_accumulation);
 
-                accumulator.update_with_ksq(&added_tuples, &removed_tuples, king_squares, ft);
+                accumulator.update_with_ksq(
+                    &added_tuples[..added_count],
+                    &removed_tuples[..removed_count],
+                    king_squares,
+                    ft,
+                );
             } else {
                 return false;
             }
@@ -366,20 +372,21 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
             if let Some((removed, added, removed_count, added_count)) =
                 entry.compute_diff(pieces, king_sq)
             {
-                let mut removed_tuples: Vec<(usize, usize)> = Vec::with_capacity(removed_count);
-                let mut added_tuples: Vec<(usize, usize)> = Vec::with_capacity(added_count);
+                let mut removed_tuples: [(usize, usize); MAX_DIFF_PIECES] =
+                    [(0, 0); MAX_DIFF_PIECES];
+                let mut added_tuples: [(usize, usize); MAX_DIFF_PIECES] = [(0, 0); MAX_DIFF_PIECES];
 
                 for i in 0..removed_count {
-                    removed_tuples.push((removed[i].square, removed[i].piece));
+                    removed_tuples[i] = (removed[i].square, removed[i].piece);
                 }
                 for i in 0..added_count {
-                    added_tuples.push((added[i].square, added[i].piece));
+                    added_tuples[i] = (added[i].square, added[i].piece);
                 }
 
                 accumulator.apply_changes_to_buffer(
                     &mut entry.accumulation.as_mut_slice()[..],
-                    &added_tuples,
-                    &removed_tuples,
+                    &added_tuples[..added_count],
+                    &removed_tuples[..removed_count],
                     king_squares,
                     ft,
                     perspective,
