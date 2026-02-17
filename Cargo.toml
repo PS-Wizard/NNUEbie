@@ -18,10 +18,6 @@ path = "src/bin/validate.rs"
 name = "benchmark"
 path = "src/bin/benchmark.rs"
 
-[[bin]]
-name = "benchmark_multithread"
-path = "src/bin/benchmark_multithread.rs"
-
 [profile.release]
 opt-level = 3
 lto = "fat"
