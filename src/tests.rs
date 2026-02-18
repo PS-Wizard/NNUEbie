@@ -1,14 +1,15 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
-    use crate::network::NnueNetworks;
     use crate::nnue::NNUEProbe;
     use crate::types::{Color, Piece};
     use crate::uci::{calculate_material, to_centipawns};
-    use std::sync::Arc;
+    use crate::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
 
     const BIG_NETWORK: &str = "archive/nnue/networks/nn-1c0000000000.nnue";
     const SMALL_NETWORK: &str = "archive/nnue/networks/nn-37f18f62d772.nnue";
 
+    #[allow(dead_code)]
     fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize) {
         let parts: Vec<&str> = fen.split_whitespace().collect();
         let board_str = parts[0];
@@ -22,7 +23,7 @@ mod tests {
             if c == '/' {
                 rank -= 1;
                 file = 0;
-            } else if c.is_digit(10) {
+            } else if c.is_ascii_digit() {
                 file += c.to_digit(10).unwrap() as usize;
             } else {
                 let color = if c.is_uppercase() { WHITE } else { BLACK };
@@ -58,7 +59,7 @@ mod tests {
             if c == '/' {
                 rank -= 1;
                 file = 0;
-            } else if c.is_digit(10) {
+            } else if c.is_ascii_digit() {
                 file += c.to_digit(10).unwrap() as usize;
             } else {
                 let piece = match c {
@@ -192,7 +193,7 @@ mod tests {
 
         println!("White to move: {} cp", cp_w);
         println!("Black to move: {} cp", cp_b);
-        assert!(true);
+        // assert!(true);
     }
 }
 
@@ -218,7 +219,7 @@ mod manual_verification {
             if c == '/' {
                 rank -= 1;
                 file = 0;
-            } else if c.is_digit(10) {
+            } else if c.is_ascii_digit() {
                 file += c.to_digit(10).unwrap() as usize;
             } else {
                 let piece = match c {
@@ -307,7 +308,7 @@ mod manual_verification {
             println!("{}: {} cp (white perspective)", name, score);
         }
         println!("\nCompare these with Stockfish 'Final evaluation' values.");
-        assert!(true);
+        // assert!(true);
     }
 
     #[test]

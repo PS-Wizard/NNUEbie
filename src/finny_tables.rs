@@ -1,23 +1,21 @@
 use crate::accumulator::Accumulator;
 use crate::aligned::AlignedBuffer;
-use crate::feature_transformer::FeatureTransformer;
+use crate::feature_transformer::{FeatureTransformer, PSQT_BUCKETS};
+use crate::features::make_index;
+use crate::types::{Piece, Square};
 
-use crate::feature_transformer::PSQT_BUCKETS;
-
-const MAX_DIFF_PIECES: usize = 4;
-
-#[derive(Clone, Copy)]
-pub struct PieceInfo {
-    square: usize,
-    piece: usize,
-}
-
+#[derive(Clone)]
 pub struct AccumulatorCacheEntry<const SIZE: usize> {
     pub accumulation: AlignedBuffer<i16>,
     pub psqt_accumulation: [i32; PSQT_BUCKETS],
     pub by_color_bb: [u64; 2],
-    pub by_type_bb: [u64; 6],
-    pub valid: bool,
+    pub by_type_bb: [u64; 6], // Pawn to King (0-5)
+}
+
+impl<const SIZE: usize> Default for AccumulatorCacheEntry<SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<const SIZE: usize> AccumulatorCacheEntry<SIZE> {
@@ -27,7 +25,6 @@ impl<const SIZE: usize> AccumulatorCacheEntry<SIZE> {
             psqt_accumulation: [0; PSQT_BUCKETS],
             by_color_bb: [0; 2],
             by_type_bb: [0; 6],
-            valid: false,
         }
     }
 
@@ -36,151 +33,18 @@ impl<const SIZE: usize> AccumulatorCacheEntry<SIZE> {
         self.psqt_accumulation.fill(0);
         self.by_color_bb.fill(0);
         self.by_type_bb.fill(0);
-        self.valid = true;
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.valid
-    }
-
-    pub fn compute_diff(
-        &self,
-        pieces: &[(usize, usize)],
-        _king_sq: usize,
-    ) -> Option<(
-        [PieceInfo; MAX_DIFF_PIECES],
-        [PieceInfo; MAX_DIFF_PIECES],
-        usize,
-        usize,
-    )> {
-        if !self.valid {
-            return None;
-        }
-
-        let mut current_color_bb = [0u64; 2];
-        let mut current_type_bb = [0u64; 6];
-
-        for &(sq, pc) in pieces {
-            let color = pc / 8;
-            let piece_type = match pc % 8 {
-                1 => 0,
-                2 => 1,
-                3 => 2,
-                4 => 3,
-                5 => 4,
-                6 => 5,
-                _ => continue,
-            };
-            current_color_bb[color] |= 1u64 << sq;
-            current_type_bb[piece_type] |= 1u64 << sq;
-        }
-
-        let mut removed = [PieceInfo {
-            square: 0,
-            piece: 0,
-        }; MAX_DIFF_PIECES];
-        let mut added = [PieceInfo {
-            square: 0,
-            piece: 0,
-        }; MAX_DIFF_PIECES];
-        let mut removed_count = 0;
-        let mut added_count = 0;
-
-        for color in 0..2 {
-            let old_color = self.by_color_bb[color];
-            let new_color = current_color_bb[color];
-            let diff = old_color ^ new_color;
-            let to_remove = old_color & diff;
-            let to_add = new_color & diff;
-
-            for piece_type in 0..6 {
-                let old_type = self.by_type_bb[piece_type];
-                let new_type = current_type_bb[piece_type];
-
-                let pieces_removed = to_remove & old_type;
-                let pieces_added = to_add & new_type;
-
-                let mut bb = pieces_removed;
-                while bb != 0 && removed_count < MAX_DIFF_PIECES {
-                    let sq = bb.trailing_zeros() as usize;
-                    removed[removed_count] = PieceInfo {
-                        square: sq,
-                        piece: color * 8 + piece_type + 1,
-                    };
-                    removed_count += 1;
-                    bb &= bb - 1;
-                }
-
-                let mut bb = pieces_added;
-                while bb != 0 && added_count < MAX_DIFF_PIECES {
-                    let sq = bb.trailing_zeros() as usize;
-                    added[added_count] = PieceInfo {
-                        square: sq,
-                        piece: color * 8 + piece_type + 1,
-                    };
-                    added_count += 1;
-                    bb &= bb - 1;
-                }
-            }
-        }
-
-        let diff_count = removed_count + added_count;
-
-        if diff_count <= MAX_DIFF_PIECES {
-            Some((removed, added, removed_count, added_count))
-        } else {
-            None
-        }
-    }
-
-    pub fn count_diff(&self, pieces: &[(usize, usize)]) -> Option<usize> {
-        if !self.valid {
-            return None;
-        }
-
-        let mut current_color_bb = [0u64; 2];
-
-        for &(sq, pc) in pieces {
-            let color = pc / 8;
-            current_color_bb[color] |= 1u64 << sq;
-        }
-
-        let white_diff = self.by_color_bb[0] ^ current_color_bb[0];
-        let black_diff = self.by_color_bb[1] ^ current_color_bb[1];
-
-        let diff_count = (white_diff.count_ones() + black_diff.count_ones()) as usize;
-
-        if diff_count <= MAX_DIFF_PIECES {
-            Some(diff_count as usize)
-        } else {
-            None
-        }
-    }
-
-    /// Check if a king moved for a given perspective
-    /// Returns true if the moved piece is a king (piece == 6 for white, 14 for black)
-    pub fn requires_refresh(perspective: usize, piece_to: &[usize; 3], dirty_num: usize) -> bool {
-        for i in 0..dirty_num {
-            let piece = piece_to[i];
-            if perspective == 0 && piece == 6 {
-                return true;
-            }
-            if perspective == 1 && piece == 14 {
-                return true;
-            }
-        }
-        false
-    }
-}
-
-impl<const SIZE: usize> Default for AccumulatorCacheEntry<SIZE> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 pub struct AccumulatorCache<const SIZE: usize> {
+    // entries[king_sq][perspective]
     pub entries: [[AccumulatorCacheEntry<SIZE>; 2]; 64],
+}
+
+impl<const SIZE: usize> Default for AccumulatorCache<SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<const SIZE: usize> AccumulatorCache<SIZE> {
@@ -191,263 +55,39 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
     }
 
     pub fn clear(&mut self, biases: &[i16]) {
-        for square_entries in &mut self.entries {
-            for entry in square_entries {
-                entry.clear(biases);
+        for sq in 0..64 {
+            for c in 0..2 {
+                self.entries[sq][c].clear(biases);
             }
         }
     }
 
-    /// Pre-populate all 64 king square entries for a given position
-    /// For each king square, compute the accumulator for that king position with all pieces
     pub fn prepopulate(
         &mut self,
         pieces: &[(usize, usize)],
-        ft: &crate::feature_transformer::FeatureTransformer,
+        ft: &FeatureTransformer,
         _king_squares: [usize; 2],
     ) {
         for king_sq in 0..64 {
-            // Compute accumulator for each king square
-            let mut acc = crate::accumulator::Accumulator::<SIZE>::new();
-
-            // Initialize with biases
-            acc.accumulation[0].copy_from_slice(&ft.biases);
-            acc.accumulation[1].copy_from_slice(&ft.biases);
-            acc.psqt_accumulation[0].fill(0);
-            acc.psqt_accumulation[1].fill(0);
-
-            // Add features for this king square
-            let ksq = [king_sq, king_sq]; // Both perspectives use same king square
-
-            for &(sq, pc) in pieces {
-                let idx_w = crate::features::make_index(
-                    crate::features::WHITE,
-                    sq,
-                    pc,
-                    ksq[crate::features::WHITE],
-                );
-                acc.add_feature(crate::features::WHITE, idx_w, ft);
-
-                let idx_b = crate::features::make_index(
-                    crate::features::BLACK,
-                    sq,
-                    pc,
-                    ksq[crate::features::BLACK],
-                );
-                acc.add_feature(crate::features::BLACK, idx_b, ft);
-            }
-
-            // Store in cache for both perspectives
-            for perspective in 0..2 {
-                let entry = &mut self.entries[king_sq][perspective];
-                entry
-                    .accumulation
-                    .copy_from_slice(&acc.accumulation[perspective]);
-                entry.psqt_accumulation = acc.psqt_accumulation[perspective];
-                entry.valid = true;
-
-                // Compute bitboards for this entry
-                entry.by_color_bb.fill(0);
-                entry.by_type_bb.fill(0);
-
-                for &(sq, pc) in pieces {
-                    let color = pc / 8;
-                    entry.by_color_bb[color] |= 1u64 << sq;
-
-                    let piece_type = match pc % 8 {
-                        1 => 0,
-                        2 => 1,
-                        3 => 2,
-                        4 => 3,
-                        5 => 4,
-                        6 => 5,
-                        _ => continue,
-                    };
-                    entry.by_type_bb[piece_type] |= 1u64 << sq;
-                }
+            for c in 0..2 {
+                self.entries[king_sq][c].clear(&ft.biases);
+                let mut temp_acc = Accumulator::<SIZE>::new();
+                temp_acc.accumulation[c].copy_from_slice(&ft.biases);
+                update_accumulator_refresh_cache(ft, &mut temp_acc, self, c, king_sq, pieces);
             }
         }
-    }
-
-    pub fn try_refresh(
-        &mut self,
-        accumulator: &mut Accumulator<SIZE>,
-        pieces: &[(usize, usize)],
-        king_squares: [usize; 2],
-        ft: &FeatureTransformer,
-    ) -> bool {
-        for perspective in 0..2 {
-            let king_sq = king_squares[perspective];
-            let entry = &mut self.entries[king_sq][perspective];
-
-            if !entry.is_valid() {
-                return false;
-            }
-
-            if let Some((removed, added, removed_count, added_count)) =
-                entry.compute_diff(pieces, king_sq)
-            {
-                let mut removed_tuples: [(usize, usize); MAX_DIFF_PIECES] =
-                    [(0, 0); MAX_DIFF_PIECES];
-                let mut added_tuples: [(usize, usize); MAX_DIFF_PIECES] = [(0, 0); MAX_DIFF_PIECES];
-
-                for i in 0..removed_count {
-                    removed_tuples[i] = (removed[i].square, removed[i].piece);
-                }
-                for i in 0..added_count {
-                    added_tuples[i] = (added[i].square, added[i].piece);
-                }
-
-                accumulator.accumulation[perspective].copy_from_slice(&*entry.accumulation);
-                accumulator.psqt_accumulation[perspective]
-                    .copy_from_slice(&entry.psqt_accumulation);
-
-                accumulator.update_with_ksq(
-                    &added_tuples[..added_count],
-                    &removed_tuples[..removed_count],
-                    king_squares,
-                    ft,
-                );
-            } else {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    pub fn update_cache(
-        &mut self,
-        accumulator: &Accumulator<SIZE>,
-        pieces: &[(usize, usize)],
-        king_squares: [usize; 2],
-    ) {
-        for perspective in 0..2 {
-            let king_sq = king_squares[perspective];
-            let entry = &mut self.entries[king_sq][perspective];
-
-            entry
-                .accumulation
-                .copy_from_slice(accumulator.accumulation[perspective].as_slice());
-            entry
-                .psqt_accumulation
-                .copy_from_slice(&accumulator.psqt_accumulation[perspective]);
-
-            entry.by_color_bb.fill(0);
-            entry.by_type_bb.fill(0);
-
-            for &(sq, pc) in pieces {
-                let color = pc / 8;
-                entry.by_color_bb[color] |= 1u64 << sq;
-
-                let piece_type = match pc % 8 {
-                    1 => 0,
-                    2 => 1,
-                    3 => 2,
-                    4 => 3,
-                    5 => 4,
-                    6 => 5,
-                    _ => continue,
-                };
-                entry.by_type_bb[piece_type] |= 1u64 << sq;
-            }
-
-            entry.valid = true;
-        }
-    }
-
-    /// In-place cache refresh - Stockfish style
-    /// Updates both the cache entry AND the accumulator in one pass
-    /// This is more efficient as it avoids an extra copy
-    pub fn refresh_in_place(
-        &mut self,
-        accumulator: &mut Accumulator<SIZE>,
-        pieces: &[(usize, usize)],
-        king_squares: [usize; 2],
-        ft: &FeatureTransformer,
-    ) {
-        for perspective in 0..2 {
-            let king_sq = king_squares[perspective];
-            let entry = &mut self.entries[king_sq][perspective];
-
-            if let Some((removed, added, removed_count, added_count)) =
-                entry.compute_diff(pieces, king_sq)
-            {
-                let mut removed_tuples: [(usize, usize); MAX_DIFF_PIECES] =
-                    [(0, 0); MAX_DIFF_PIECES];
-                let mut added_tuples: [(usize, usize); MAX_DIFF_PIECES] = [(0, 0); MAX_DIFF_PIECES];
-
-                for i in 0..removed_count {
-                    removed_tuples[i] = (removed[i].square, removed[i].piece);
-                }
-                for i in 0..added_count {
-                    added_tuples[i] = (added[i].square, added[i].piece);
-                }
-
-                accumulator.apply_changes_to_buffer(
-                    &mut entry.accumulation.as_mut_slice()[..],
-                    &added_tuples[..added_count],
-                    &removed_tuples[..removed_count],
-                    king_squares,
-                    ft,
-                    perspective,
-                );
-
-                for (i, &bucket) in entry.psqt_accumulation.iter().enumerate() {
-                    accumulator.psqt_accumulation[perspective][i] = bucket;
-                }
-
-                for &(_, pc) in &removed_tuples {
-                    let color = pc / 8;
-                    let piece_type = match pc % 8 {
-                        1 => 0,
-                        2 => 1,
-                        3 => 2,
-                        4 => 3,
-                        5 => 4,
-                        6 => 5,
-                        _ => continue,
-                    };
-                    let sq = removed_tuples
-                        .iter()
-                        .find(|&&(_s, p)| p == pc)
-                        .map(|(s, _)| *s)
-                        .unwrap_or(0);
-                    entry.by_color_bb[color] &= !(1u64 << sq);
-                    entry.by_type_bb[piece_type] &= !(1u64 << sq);
-                }
-                for &(sq, pc) in &added_tuples {
-                    let color = pc / 8;
-                    let piece_type = match pc % 8 {
-                        1 => 0,
-                        2 => 1,
-                        3 => 2,
-                        4 => 3,
-                        5 => 4,
-                        6 => 5,
-                        _ => continue,
-                    };
-                    entry.by_color_bb[color] |= 1u64 << sq;
-                    entry.by_type_bb[piece_type] |= 1u64 << sq;
-                }
-            }
-
-            accumulator.accumulation[perspective].copy_from_slice(&*entry.accumulation);
-            accumulator.psqt_accumulation[perspective].copy_from_slice(&entry.psqt_accumulation);
-            accumulator.computed[perspective] = true;
-        }
-    }
-}
-
-impl<const SIZE: usize> Default for AccumulatorCache<SIZE> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 pub struct FinnyTables {
     pub cache_big: AccumulatorCache<3072>,
     pub cache_small: AccumulatorCache<128>,
+}
+
+impl Default for FinnyTables {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FinnyTables {
@@ -463,13 +103,11 @@ impl FinnyTables {
         self.cache_small.clear(biases_small);
     }
 
-    /// Pre-populate Finny Tables for all 64 king squares
-    /// Computes full accumulators for each king square × 2 perspectives = 128 entries
     pub fn prepopulate(
         &mut self,
         pieces: &[(usize, usize)],
-        ft_big: &crate::feature_transformer::FeatureTransformer,
-        ft_small: &crate::feature_transformer::FeatureTransformer,
+        ft_big: &FeatureTransformer,
+        ft_small: &FeatureTransformer,
         king_squares: [usize; 2],
     ) {
         self.cache_big.prepopulate(pieces, ft_big, king_squares);
@@ -477,50 +115,143 @@ impl FinnyTables {
     }
 }
 
-impl Default for FinnyTables {
-    fn default() -> Self {
-        Self::new()
-    }
+// Helper to pop lsb from u64
+fn pop_lsb(b: &mut u64) -> usize {
+    let s = b.trailing_zeros();
+    *b &= *b - 1;
+    s as usize
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Updates the accumulator cache entry and the target accumulator
+pub fn update_accumulator_refresh_cache<const SIZE: usize>(
+    ft: &FeatureTransformer,
+    accumulator: &mut Accumulator<SIZE>,
+    cache: &mut AccumulatorCache<SIZE>,
+    perspective: usize,
+    ksq: usize,
+    pieces: &[(Square, usize)],
+) {
+    let entry = &mut cache.entries[ksq][perspective];
 
-    #[test]
-    fn test_cache_entry_new() {
-        let entry: AccumulatorCacheEntry<128> = AccumulatorCacheEntry::new();
-        assert!(!entry.valid);
+    let mut current_color_bb = [0u64; 2];
+    let mut current_type_bb = [0u64; 6];
+
+    for &(sq, pc_idx) in pieces {
+        let piece = Piece::from_index(pc_idx);
+        if let Some(color) = piece.color() {
+            let pt = piece.piece_type();
+            if pt > 0 {
+                current_color_bb[color.index()] |= 1u64 << sq;
+                current_type_bb[pt - 1] |= 1u64 << sq;
+            }
+        }
     }
 
-    #[test]
-    fn test_cache_entry_clear() {
-        let mut entry: AccumulatorCacheEntry<128> = AccumulatorCacheEntry::new();
-        let biases = vec![1i16; 128];
-        entry.clear(&biases);
-        assert!(entry.valid);
-        assert_eq!(entry.accumulation[0], 1);
+    let mut added: [usize; 32] = [0; 32];
+    let mut removed: [usize; 32] = [0; 32];
+    let mut added_count = 0;
+    let mut removed_count = 0;
+
+    for (c, current_bb) in current_color_bb.iter().enumerate() {
+        for (pt, current_type) in current_type_bb.iter().enumerate() {
+            let piece_idx = if c == 0 { pt + 1 } else { pt + 9 };
+            let old_bb = entry.by_color_bb[c] & entry.by_type_bb[pt];
+            let new_bb = current_bb & current_type;
+            let mut to_remove = old_bb & !new_bb;
+            let mut to_add = new_bb & !old_bb;
+
+            while to_remove != 0 {
+                let sq = pop_lsb(&mut to_remove);
+                removed[removed_count] = make_index(perspective, sq, piece_idx, ksq);
+                removed_count += 1;
+            }
+
+            while to_add != 0 {
+                let sq = pop_lsb(&mut to_add);
+                added[added_count] = make_index(perspective, sq, piece_idx, ksq);
+                added_count += 1;
+            }
+        }
     }
 
-    #[test]
-    fn test_cache_diff_count() {
-        let mut entry: AccumulatorCacheEntry<128> = AccumulatorCacheEntry::new();
-        let biases = vec![0i16; 128];
-        entry.clear(&biases);
+    let added_slice = &added[..added_count];
+    let removed_slice = &removed[..removed_count];
 
-        entry.by_color_bb[0] = 1u64 << 12;
-        entry.by_type_bb[0] = 1u64 << 12;
+    // Optimize update using AVX2 kernels if available
+    let mut updated_accumulation = false;
 
-        let pieces = vec![(12, 1usize)];
-        let diff = entry.count_diff(&pieces);
-        assert_eq!(diff, Some(0));
-
-        let pieces = vec![(12, 1), (13, 1)];
-        let diff = entry.count_diff(&pieces);
-        assert_eq!(diff, Some(1));
-
-        let pieces: Vec<(usize, usize)> = (0..32).map(|i| (i, 1)).collect();
-        let diff = entry.count_diff(&pieces);
-        assert_eq!(diff, None);
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        unsafe {
+            if SIZE == 3072 {
+                crate::accumulator_refresh::update_and_copy_avx2_3072(
+                    entry.accumulation.as_mut_slice(),
+                    accumulator.accumulation[perspective].as_mut_slice(),
+                    &ft.weights,
+                    added_slice,
+                    removed_slice,
+                );
+                updated_accumulation = true;
+            } else if SIZE == 128 {
+                crate::accumulator_refresh::update_and_copy_avx2_128(
+                    entry.accumulation.as_mut_slice(),
+                    accumulator.accumulation[perspective].as_mut_slice(),
+                    &ft.weights,
+                    added_slice,
+                    removed_slice,
+                );
+                updated_accumulation = true;
+            }
+        }
     }
+
+    if !updated_accumulation {
+        // Scalar fallback
+        let get_weight = |feat_idx: usize| {
+            let offset = feat_idx * SIZE;
+            &ft.weights[offset..offset + SIZE]
+        };
+
+        for &feat_idx in removed_slice {
+            let w = get_weight(feat_idx);
+            for (j, &val) in w.iter().enumerate().take(SIZE) {
+                entry.accumulation[j] -= val;
+            }
+        }
+        for &feat_idx in added_slice {
+            let w = get_weight(feat_idx);
+            for (j, &val) in w.iter().enumerate().take(SIZE) {
+                entry.accumulation[j] += val;
+            }
+        }
+        // Copy to accumulator
+        accumulator.accumulation[perspective].copy_from_slice(&entry.accumulation);
+    }
+
+    // Always update PSQT (scalar loop is fine, it's small)
+    let get_psqt = |feat_idx: usize| {
+        let offset = feat_idx * PSQT_BUCKETS;
+        &ft.psqt_weights[offset..offset + PSQT_BUCKETS]
+    };
+
+    for &feat_idx in removed_slice {
+        let pq = get_psqt(feat_idx);
+        for (j, &val) in pq.iter().enumerate().take(PSQT_BUCKETS) {
+            entry.psqt_accumulation[j] -= val;
+        }
+    }
+    for &feat_idx in added_slice {
+        let pq = get_psqt(feat_idx);
+        for (j, &val) in pq.iter().enumerate().take(PSQT_BUCKETS) {
+            entry.psqt_accumulation[j] += val;
+        }
+    }
+
+    // Update Entry Bitboards
+    entry.by_color_bb = current_color_bb;
+    entry.by_type_bb = current_type_bb;
+
+    // Copy PSQT to accumulator
+    accumulator.psqt_accumulation[perspective] = entry.psqt_accumulation;
+    accumulator.computed[perspective] = true;
 }

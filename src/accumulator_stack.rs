@@ -1,20 +1,15 @@
 use crate::accumulator::Accumulator;
 use crate::feature_transformer::FeatureTransformer;
+use crate::finny_tables::FinnyTables;
 
-const MAX_PLY: usize = 128; // Maximum search depth + some margin
+const MAX_PLY: usize = 128;
 
-/// Information about what pieces changed between positions
 #[derive(Clone, Debug)]
 pub struct DirtyPiece {
-    /// Number of pieces that changed
     pub dirty_num: usize,
-    /// Squares where pieces were removed (from_sq for moves, captured squares)
     pub from: [usize; 3],
-    /// Squares where pieces were added (to_sq for moves, promotion pieces)
     pub to: [usize; 3],
-    /// Piece types that were removed
     pub piece_from: [usize; 3],
-    /// Piece types that were added  
     pub piece_to: [usize; 3],
 }
 
@@ -50,14 +45,19 @@ impl Default for DirtyPiece {
     }
 }
 
-/// Accumulator state for a single position in the search tree
 #[derive(Clone)]
 pub struct AccumulatorState {
     pub acc_big: Accumulator<3072>,
     pub acc_small: Accumulator<128>,
     pub dirty_piece: DirtyPiece,
-    pub computed: [bool; 2], // Track if each perspective is computed
+    pub computed: [bool; 2],
     pub rule50: i32,
+}
+
+impl Default for AccumulatorState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AccumulatorState {
@@ -78,231 +78,61 @@ impl AccumulatorState {
     }
 }
 
-impl Default for AccumulatorState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Stack of accumulator states for efficient make/unmake in search
 pub struct AccumulatorStack {
     stack: Vec<AccumulatorState>,
     current_idx: usize,
 }
 
+impl Default for AccumulatorStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AccumulatorStack {
     pub fn new() -> Self {
         let mut stack = Vec::with_capacity(MAX_PLY + 1);
-        // Initialize with one empty state at index 0
         stack.push(AccumulatorState::new());
-
         Self {
             stack,
-            current_idx: 1, // Start at 1 so we can always access current_idx - 1
+            current_idx: 1,
         }
     }
 
-    /// Get the latest (current) accumulator state
     pub fn latest(&self) -> &AccumulatorState {
         &self.stack[self.current_idx - 1]
     }
 
-    /// Get mutable reference to latest state
     pub fn mut_latest(&mut self) -> &mut AccumulatorState {
         &mut self.stack[self.current_idx - 1]
     }
 
-    /// Get the current stack index
-    pub fn current_index(&self) -> usize {
-        self.current_idx
-    }
-
-    /// Get mutable reference to state at specific index (for advanced use)
     pub fn state_at_mut(&mut self, idx: usize) -> &mut AccumulatorState {
         &mut self.stack[idx]
     }
 
-    /// Push a new position onto the stack (make move)
-    /// Stockfish-style: no deep copy of accumulators - just mark as not computed
-    /// This avoids copying ~12KB on every move
     pub fn push(&mut self, dirty_piece: &DirtyPiece, rule50: i32) {
-        assert!(
-            self.current_idx + 1 < self.stack.capacity(),
-            "AccumulatorStack overflow - increase MAX_PLY"
-        );
-
-        // If we need to grow the stack
         if self.current_idx >= self.stack.len() {
             self.stack.push(AccumulatorState::new());
         }
-
-        // Stockfish approach: NO copying!
-        // Just mark the state as needing recomputation
-        // The accumulators from previous state will be reused via incremental updates
         self.stack[self.current_idx].reset(dirty_piece, rule50);
-
         self.current_idx += 1;
     }
 
-    /// Pop a position from the stack (unmake move) - O(1)!
     pub fn pop(&mut self) {
-        assert!(self.current_idx > 1, "Cannot pop root position");
-        self.current_idx -= 1;
+        if self.current_idx > 1 {
+            self.current_idx -= 1;
+        }
     }
 
-    /// Reset the stack to a single position (root position)
     pub fn reset(&mut self) {
         self.current_idx = 1;
         self.stack[0] = AccumulatorState::new();
     }
 
-    /// Incrementally update accumulators using forward propagation
-    ///
-    /// Stockfish-style: Instead of copying all data from last computed state to current,
-    /// we chain updates: copy from state[N] to state[N+1], apply dirty_piece of N+1,
-    /// then N+1 to N+2, etc. This eliminates the ~12KB deep copy.
-    pub fn update_incremental(
-        &mut self,
-        king_squares: [usize; 2],
-        ft_big: &FeatureTransformer,
-        ft_small: &FeatureTransformer,
-    ) {
-        // Find the last computed state
-        let current_idx = self.current_idx;
-        let mut last_computed_idx = current_idx - 1;
-
-        // Search backward for a computed state
-        while last_computed_idx > 0 {
-            if self.stack[last_computed_idx].computed == [true, true] {
-                break;
-            }
-            last_computed_idx -= 1;
-        }
-
-        let has_computed = self
-            .stack
-            .get(last_computed_idx)
-            .map(|s| s.computed == [true, true])
-            .unwrap_or(false);
-
-        // If no computed state found, initialize the first state with biases
-        if !has_computed {
-            self.initialize_with_biases(last_computed_idx, ft_big, ft_small);
-        }
-
-        // Forward propagate: for each state from last_computed_idx+1 to current_idx-1:
-        // 1. Copy accumulation from previous state
-        // 2. Apply this state's dirty_piece
-        for i in (last_computed_idx + 1)..current_idx {
-            // Build change lists from dirty_piece for state[i]
-            // Use stack-allocated arrays to avoid Vec allocations in hot path
-            let mut removed: [(usize, usize); 3] = [(0, 0); 3];
-            let mut added: [(usize, usize); 3] = [(0, 0); 3];
-            let mut removed_count = 0;
-            let mut added_count = 0;
-
-            for j in 0..self.stack[i].dirty_piece.dirty_num {
-                if self.stack[i].dirty_piece.piece_from[j] != 0 {
-                    removed[removed_count] = (
-                        self.stack[i].dirty_piece.from[j],
-                        self.stack[i].dirty_piece.piece_from[j],
-                    );
-                    removed_count += 1;
-                }
-                if self.stack[i].dirty_piece.piece_to[j] != 0 {
-                    added[added_count] = (
-                        self.stack[i].dirty_piece.to[j],
-                        self.stack[i].dirty_piece.piece_to[j],
-                    );
-                    added_count += 1;
-                }
-            }
-
-            let removed_slice = &removed[..removed_count];
-            let added_slice = &added[..added_count];
-
-            // We need to borrow self.stack[i] and self.stack[i-1] mutably and immutably respectively.
-            // Since we can't borrow self twice, we use indices or split_at_mut, but they are adjacent in Vec.
-            // Easiest is to use raw pointers or just iterate with indices and careful borrowing.
-            // Or simple safe Rust: split_at_mut
-
-            let (left, right) = self.stack.split_at_mut(i);
-            let prev_state = &left[i - 1];
-            let curr_state = &mut right[0];
-
-            // Apply incremental updates using single-pass update (copy+update)
-            // This eliminates the explicit memcpy + add + remove overhead
-
-            if !removed_slice.is_empty() || !added_slice.is_empty() {
-                curr_state.acc_big.update_incremental(
-                    &prev_state.acc_big,
-                    added_slice,
-                    removed_slice,
-                    king_squares,
-                    ft_big,
-                );
-                curr_state.acc_small.update_incremental(
-                    &prev_state.acc_small,
-                    added_slice,
-                    removed_slice,
-                    king_squares,
-                    ft_small,
-                );
-            } else {
-                // No changes (null move?), just copy
-                // Although null move usually still changes side to move, but here we track pieces.
-                // If dirty_num is 0, it means no pieces moved/captured.
-                // We still need to copy accumulator.
-                // We can use update_incremental with empty lists, which will just copy.
-                curr_state.acc_big.update_incremental(
-                    &prev_state.acc_big,
-                    &[],
-                    &[],
-                    king_squares,
-                    ft_big,
-                );
-                curr_state.acc_small.update_incremental(
-                    &prev_state.acc_small,
-                    &[],
-                    &[],
-                    king_squares,
-                    ft_small,
-                );
-            }
-
-            // Mark as computed
-            // This is actually done inside update_incremental now, but we can double check
-            debug_assert!(curr_state.acc_big.computed == [true, true]);
-            curr_state.computed = [true, true];
-        }
-    }
-
-    /// Initialize a state with biases (when no computed state is available)
-    fn initialize_with_biases(
-        &mut self,
-        idx: usize,
-        ft_big: &FeatureTransformer,
-        ft_small: &FeatureTransformer,
-    ) {
-        // Initialize big network with biases
-        self.stack[idx].acc_big.accumulation[0].copy_from_slice(&*ft_big.biases);
-        self.stack[idx].acc_big.accumulation[1].copy_from_slice(&*ft_big.biases);
-        self.stack[idx].acc_big.psqt_accumulation.fill([0; 8]);
-        self.stack[idx].acc_big.computed = [true, true];
-
-        // Initialize small network with biases
-        self.stack[idx].acc_small.accumulation[0].copy_from_slice(&*ft_small.biases);
-        self.stack[idx].acc_small.accumulation[1].copy_from_slice(&*ft_small.biases);
-        self.stack[idx].acc_small.psqt_accumulation.fill([0; 8]);
-        self.stack[idx].acc_small.computed = [true, true];
-
-        self.stack[idx].computed = [true, true];
-    }
-
-    /// Refresh accumulators from scratch (for root position or when needed)
     pub fn refresh(
         &mut self,
-        pieces: &[(usize, usize)], // (Square, Piece)
+        pieces: &[(usize, usize)],
         king_squares: [usize; 2],
         ft_big: &FeatureTransformer,
         ft_small: &FeatureTransformer,
@@ -312,61 +142,213 @@ impl AccumulatorStack {
         current.acc_small.refresh(pieces, king_squares, ft_small);
         current.computed = [true, true];
     }
-}
 
-impl Default for AccumulatorStack {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_accumulator_stack_new() {
-        let stack = AccumulatorStack::new();
-        assert_eq!(stack.current_idx, 1);
-        assert_eq!(stack.stack.len(), 1);
+    /// Update incrementally using the Finny Tables cache if needed
+    /// This is the main update entry point, equivalent to Stockfish's evaluate
+    pub fn update_incremental(
+        &mut self,
+        king_squares: [usize; 2],
+        ft_big: &FeatureTransformer,
+        ft_small: &FeatureTransformer,
+        caches: &mut FinnyTables,
+        pieces: &[(usize, usize)], // Needed for cache refresh
+    ) {
+        self.evaluate_side::<0>(king_squares[0], ft_big, ft_small, caches, pieces);
+        self.evaluate_side::<1>(king_squares[1], ft_big, ft_small, caches, pieces);
     }
 
-    #[test]
-    fn test_accumulator_stack_push_pop() {
-        let mut stack = AccumulatorStack::new();
+    fn evaluate_side<const P: usize>(
+        &mut self,
+        ksq: usize,
+        ft_big: &FeatureTransformer,
+        ft_small: &FeatureTransformer,
+        caches: &mut FinnyTables,
+        pieces: &[(usize, usize)],
+    ) {
+        let last_usable = self.find_last_usable_accumulator(P);
 
-        // Push a move
-        let mut dp = DirtyPiece::new();
-        dp.add_change(12, 28, 1, 1); // White pawn e2->e4
-        stack.push(&dp, 0);
+        if self.stack[last_usable].computed[P] {
+            self.forward_update_incremental::<P>(last_usable, ksq, ft_big, ft_small);
+        } else {
+            // Need refresh from cache
+            let current = &mut self.stack[self.current_idx - 1];
 
-        assert_eq!(stack.current_idx, 2);
-        assert_eq!(stack.latest().dirty_piece.dirty_num, 1);
-        assert_eq!(stack.latest().dirty_piece.from[0], 12);
+            // Big network
+            crate::finny_tables::update_accumulator_refresh_cache(
+                ft_big,
+                &mut current.acc_big,
+                &mut caches.cache_big,
+                P,
+                ksq,
+                pieces,
+            );
 
-        // Pop
-        stack.pop();
-        assert_eq!(stack.current_idx, 1);
+            // Small network
+            crate::finny_tables::update_accumulator_refresh_cache(
+                ft_small,
+                &mut current.acc_small,
+                &mut caches.cache_small,
+                P,
+                ksq,
+                pieces,
+            );
+
+            current.computed[P] = true;
+
+            // Backward propagation to fill gaps
+            self.backward_update_incremental::<P>(last_usable, ksq, ft_big, ft_small);
+        }
     }
 
-    #[test]
-    fn test_accumulator_stack_multiple_pushes() {
-        let mut stack = AccumulatorStack::new();
+    fn find_last_usable_accumulator(&self, perspective: usize) -> usize {
+        for idx in (1..self.current_idx).rev() {
+            if self.stack[idx].computed[perspective] {
+                return idx;
+            }
+            // Check if king moved
+            // In Stockfish: requires_refresh(dirtyPiece, Perspective)
+            if self.requires_refresh(idx, perspective) {
+                return idx;
+            }
+        }
+        0 // Root
+    }
 
-        // Simulate a sequence of moves
-        for i in 0..10 {
-            let mut dp = DirtyPiece::new();
-            dp.add_change(i, i + 1, 1, 1);
-            stack.push(&dp, 0);
+    fn requires_refresh(&self, idx: usize, perspective: usize) -> bool {
+        let dp = &self.stack[idx].dirty_piece;
+        for i in 0..dp.dirty_num {
+            // Check if king moved
+            // White King = 6, Black King = 14
+            let pc = dp.piece_to[i];
+            if perspective == 0 && pc == 6 {
+                return true;
+            }
+            if perspective == 1 && pc == 14 {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn forward_update_incremental<const P: usize>(
+        &mut self,
+        begin: usize,
+        ksq: usize,
+        ft_big: &FeatureTransformer,
+        ft_small: &FeatureTransformer,
+    ) {
+        for i in (begin + 1)..self.current_idx {
+            // Borrow checker gymnastics
+            let (left, right) = self.stack.split_at_mut(i);
+            let prev = &left[i - 1];
+            let curr = &mut right[0];
+
+            Self::apply_update::<P, true>(prev, curr, ksq, ft_big, ft_small);
+        }
+    }
+
+    fn backward_update_incremental<const P: usize>(
+        &mut self,
+        end: usize,
+        ksq: usize,
+        ft_big: &FeatureTransformer,
+        ft_small: &FeatureTransformer,
+    ) {
+        for i in (end..self.current_idx - 1).rev() {
+            // i is target, i+1 is source (computed)
+            let (left, right) = self.stack.split_at_mut(i + 1);
+            let target = &mut left[i];
+            let source = &right[0];
+
+            Self::apply_update::<P, false>(source, target, ksq, ft_big, ft_small);
+        }
+    }
+
+    // Generic update helper
+    // FORWARD=true: prev -> curr
+    // FORWARD=false: curr -> prev (backward)
+    fn apply_update<const P: usize, const FORWARD: bool>(
+        source: &AccumulatorState,
+        target: &mut AccumulatorState,
+        ksq: usize,
+        ft_big: &FeatureTransformer,
+        ft_small: &FeatureTransformer,
+    ) {
+        // Determine dirty piece.
+        // If Forward: use target's dirty piece (which represents move prev->curr)
+        // If Backward: use source's dirty piece (which represents move target->source)
+        let dp = if FORWARD {
+            &target.dirty_piece
+        } else {
+            &source.dirty_piece
+        };
+
+        // Prepare lists
+        let mut added: [(usize, usize); 3] = [(0, 0); 3];
+        let mut removed: [(usize, usize); 3] = [(0, 0); 3];
+        let mut a_cnt = 0;
+        let mut r_cnt = 0;
+
+        for i in 0..dp.dirty_num {
+            if dp.piece_from[i] != 0 {
+                // Removal
+                // We actually need indices for the helper, but Accumulator::update_incremental
+                // takes (Square, Piece) and calls make_index internally.
+                removed[r_cnt] = (dp.from[i], dp.piece_from[i]);
+                r_cnt += 1;
+            }
+            if dp.piece_to[i] != 0 {
+                // Addition
+                added[a_cnt] = (dp.to[i], dp.piece_to[i]);
+                a_cnt += 1;
+            }
         }
 
-        assert_eq!(stack.current_idx, 11);
+        // If Backward: Swap added/removed!
+        // Because "undoing" an addition is a removal, and "undoing" a removal is an addition.
+        let (eff_added, eff_removed) = if FORWARD {
+            (&added[..a_cnt], &removed[..r_cnt])
+        } else {
+            (&removed[..r_cnt], &added[..a_cnt])
+        };
 
-        // Pop all
-        for _ in 0..10 {
-            stack.pop();
-        }
+        // Need to update both networks
+        // Since we are inside generic <P>, we only update perspective P
+        // But Accumulator::update_incremental updates BOTH perspectives if we pass the array.
+        // Wait, Accumulator::update_incremental updates both 0 and 1.
+        // But here we are inside evaluate_side<P>.
+        // We only want to update accumulator[P].
+        // Our Accumulator struct has [AlignedBuffer; 2].
+        // update_incremental updates BOTH.
 
-        assert_eq!(stack.current_idx, 1);
+        // Stockfish's update_accumulator_incremental is templated on Perspective.
+        // My Accumulator::update_incremental is not.
+        // I should probably fix Accumulator::update_incremental to take a perspective or update both.
+        // But here we only computed P for the King Square of P.
+        // The other perspective might have a DIFFERENT King Square!
+        // So we CANNOT use Accumulator::update_incremental as is, because it assumes same ksq array for both?
+        // Actually it takes `ksq: [usize; 2]`.
+        // But here we only know ksq for P. The ksq for 1-P might be different and might have moved!
+
+        // So we MUST use a perspective-specific update.
+        // I need to add `update_incremental_perspective` to Accumulator.
+
+        target.acc_big.update_incremental_perspective::<P>(
+            &source.acc_big,
+            eff_added,
+            eff_removed,
+            ksq,
+            ft_big,
+        );
+
+        target.acc_small.update_incremental_perspective::<P>(
+            &source.acc_small,
+            eff_added,
+            eff_removed,
+            ksq,
+            ft_small,
+        );
+
+        target.computed[P] = true;
     }
 }

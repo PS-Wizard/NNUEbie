@@ -173,6 +173,53 @@ impl<const SIZE: usize> Accumulator<SIZE> {
         }
     }
 
+    pub fn update_incremental_perspective<const P: usize>(
+        &mut self,
+        prev: &Accumulator<SIZE>,
+        added: &[(usize, usize)],
+        removed: &[(usize, usize)],
+        ksq: usize,
+        ft: &FeatureTransformer,
+    ) {
+        // PSQT update
+        self.psqt_accumulation[P] = prev.psqt_accumulation[P];
+
+        for &(sq, pc) in removed {
+            let idx = make_index(P, sq, pc, ksq);
+            self.update_psqt(P, idx, ft, false);
+        }
+        for &(sq, pc) in added {
+            let idx = make_index(P, sq, pc, ksq);
+            self.update_psqt(P, idx, ft, true);
+        }
+
+        // Feature update
+        let mut added_weights: [&[i16]; 3] = [&[]; 3];
+        let mut removed_weights: [&[i16]; 3] = [&[]; 3];
+
+        for (i, &(sq, pc)) in added.iter().enumerate().take(3) {
+            let idx = make_index(P, sq, pc, ksq);
+            let offset = idx * SIZE;
+            added_weights[i] = &ft.weights[offset..offset + SIZE];
+        }
+        for (i, &(sq, pc)) in removed.iter().enumerate().take(3) {
+            let idx = make_index(P, sq, pc, ksq);
+            let offset = idx * SIZE;
+            removed_weights[i] = &ft.weights[offset..offset + SIZE];
+        }
+
+        unsafe {
+            (self.update_single_pass_fn)(
+                &prev.accumulation[P],
+                &mut self.accumulation[P],
+                &added_weights[..added.len()],
+                &removed_weights[..removed.len()],
+            );
+        }
+
+        self.computed[P] = true;
+    }
+
     /// Incrementally updates the accumulator from a previous state.
     ///
     /// This combines copy, add, and remove into a single pass for efficiency.

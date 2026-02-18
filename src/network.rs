@@ -323,7 +323,7 @@ impl Network {
 
 fn get_permutation_map(dims: usize) -> Vec<usize> {
     let mut map = vec![0; dims];
-    for i in 0..dims {
+    for (i, m) in map.iter_mut().enumerate().take(dims) {
         let c = i / 32;
         let byte = i % 32;
         let k = c / 2;
@@ -345,7 +345,7 @@ fn get_permutation_map(dims: usize) -> Vec<usize> {
         } else {
             block_b * 16 + (byte - 24) + 8
         };
-        map[i] = feature_idx;
+        *m = feature_idx;
     }
     map
 }

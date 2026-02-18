@@ -56,7 +56,7 @@ pub const fn piece_index(p: Piece) -> usize {
 // Piece to NNUE index mapping
 // 11 types * 64 squares
 const PS_W_PAWN: usize = 0;
-const PS_B_PAWN: usize = 1 * SQUARE_NB;
+const PS_B_PAWN: usize = SQUARE_NB;
 const PS_W_KNIGHT: usize = 2 * SQUARE_NB;
 const PS_B_KNIGHT: usize = 3 * SQUARE_NB;
 const PS_W_BISHOP: usize = 4 * SQUARE_NB;
