@@ -62,6 +62,11 @@ impl NNUEProbe {
         self.king_squares = [0; 2];
         self.accumulator_stack.reset();
 
+        // Note: We DO NOT clear Finny Tables here!
+        // Stockfish persists the cache across positions.
+        // Clearing it would force a full refresh on every node, killing performance.
+        // The cache will correct itself lazily when a king lands on a square.
+
         // Set rule50 on the root state
         self.accumulator_stack.state_at_mut(0).rule50 = rule50;
 
@@ -69,10 +74,24 @@ impl NNUEProbe {
             self.add_piece_internal(piece, square);
         }
 
-        self.refresh_accumulators();
+        // Use incremental update which leverages Finny Tables
+        // This handles both fresh updates (diff against empty cache) and
+        // repeated positions (diff against cached cache) efficiently.
+        let mut all_pieces: Vec<(usize, usize)> = Vec::with_capacity(32);
+        for sq in 0..64 {
+            let p = self.pieces[sq];
+            if p != Piece::None {
+                all_pieces.push((sq, p.index()));
+            }
+        }
 
-        // Update cache with current position for future refreshes
-        self.update_cache_for_current_position();
+        self.accumulator_stack.update_incremental(
+            self.king_squares,
+            &self.networks.big_net.feature_transformer,
+            &self.networks.small_net.feature_transformer,
+            &mut self.finny_tables,
+            &all_pieces,
+        );
     }
 
     /// Pre-populate Finny Tables with full accumulators for all 64 king squares
@@ -192,18 +211,28 @@ impl NNUEProbe {
         self.accumulator_stack.push(&dirty, new_rule50);
 
         // Update accums incrementally (unless king moved)
-        // If king moved, try using Finny Tables cache for faster refresh
-        if piece.is_king() {
-            // King moves - try Finny Tables cache for faster refresh
-            self.refresh_with_cache();
-        } else {
-            // Incremental update
-            self.accumulator_stack.update_incremental(
-                self.king_squares,
-                &self.networks.big_net.feature_transformer,
-                &self.networks.small_net.feature_transformer,
-            );
+        // Note: update_incremental now handles King moves internally via Finny Tables!
+        // We just need to gather current pieces for potential cache refresh.
+        // Optimization: We could only gather pieces IF cache refresh is actually needed,
+        // but that requires exposing find_last_usable logic. For now, we gather.
+        // Or we can pass a closure/iterator? No, lifetime issues.
+        // Let's gather. It's 64 iterations, branchless-ish.
+
+        let mut all_pieces: Vec<(usize, usize)> = Vec::with_capacity(32);
+        for sq in 0..64 {
+            let p = self.pieces[sq];
+            if p != Piece::None {
+                all_pieces.push((sq, p.index()));
+            }
         }
+
+        self.accumulator_stack.update_incremental(
+            self.king_squares,
+            &self.networks.big_net.feature_transformer,
+            &self.networks.small_net.feature_transformer,
+            &mut self.finny_tables,
+            &all_pieces,
+        );
     }
 
     /// Unmake a move - pops state from accumulator stack (O(1)!)
@@ -293,84 +322,6 @@ impl NNUEProbe {
             self.king_squares,
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,
-        );
-    }
-
-    /// Refresh accumulators using Finny Tables for potential speedup
-    /// Tries to use cached state from previous positions with same king square
-    fn refresh_with_cache(&mut self) {
-        // Collect all pieces
-        let mut pieces_idx: Vec<(usize, usize)> = Vec::with_capacity(self.piece_count);
-
-        for sq in 0..64 {
-            let p = self.pieces[sq];
-            if p != Piece::None {
-                pieces_idx.push((sq, p.index()));
-            }
-        }
-
-        let state = self.accumulator_stack.mut_latest();
-
-        // Try to use Finny Tables for big network
-        let cache_used_big = self.finny_tables.cache_big.try_refresh(
-            &mut state.acc_big,
-            &pieces_idx,
-            self.king_squares,
-            &self.networks.big_net.feature_transformer,
-        );
-
-        // Try to use Finny Tables for small network
-        let cache_used_small = self.finny_tables.cache_small.try_refresh(
-            &mut state.acc_small,
-            &pieces_idx,
-            self.king_squares,
-            &self.networks.small_net.feature_transformer,
-        );
-
-        if !cache_used_big || !cache_used_small {
-            // Cache miss - do full refresh
-            self.accumulator_stack.refresh(
-                &pieces_idx,
-                self.king_squares,
-                &self.networks.big_net.feature_transformer,
-                &self.networks.small_net.feature_transformer,
-            );
-
-            // Update cache with the new state
-            let state = self.accumulator_stack.latest();
-            self.finny_tables.cache_big.update_cache(
-                &state.acc_big,
-                &pieces_idx,
-                self.king_squares,
-            );
-            self.finny_tables.cache_small.update_cache(
-                &state.acc_small,
-                &pieces_idx,
-                self.king_squares,
-            );
-        }
-    }
-
-    /// Update cache with current position state
-    /// Call this after set_position to populate cache for current position
-    fn update_cache_for_current_position(&mut self) {
-        let mut pieces_idx: Vec<(usize, usize)> = Vec::with_capacity(self.piece_count);
-
-        for sq in 0..64 {
-            let p = self.pieces[sq];
-            if p != Piece::None {
-                pieces_idx.push((sq, p.index()));
-            }
-        }
-
-        let state = self.accumulator_stack.latest();
-        self.finny_tables
-            .cache_big
-            .update_cache(&state.acc_big, &pieces_idx, self.king_squares);
-        self.finny_tables.cache_small.update_cache(
-            &state.acc_small,
-            &pieces_idx,
-            self.king_squares,
         );
     }
 

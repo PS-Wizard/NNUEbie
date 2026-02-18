@@ -2,3 +2,4 @@ target
 archive/nnue
 .opencode/
 AGENTS.md
+perf.data

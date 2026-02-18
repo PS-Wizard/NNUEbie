@@ -79,6 +79,24 @@ impl Piece {
     pub fn index(&self) -> usize {
         *self as usize
     }
+
+    pub fn from_index(idx: usize) -> Self {
+        match idx {
+            1 => Piece::WhitePawn,
+            2 => Piece::WhiteKnight,
+            3 => Piece::WhiteBishop,
+            4 => Piece::WhiteRook,
+            5 => Piece::WhiteQueen,
+            6 => Piece::WhiteKing,
+            9 => Piece::BlackPawn,
+            10 => Piece::BlackKnight,
+            11 => Piece::BlackBishop,
+            12 => Piece::BlackRook,
+            13 => Piece::BlackQueen,
+            14 => Piece::BlackKing,
+            _ => Piece::None,
+        }
+    }
 }
 
 // Squares

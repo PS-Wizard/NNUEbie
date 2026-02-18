@@ -32,7 +32,7 @@ pub struct AffineTransform {
 
 impl AffineTransform {
     pub fn new(input_dims: usize, output_dims: usize) -> Self {
-        let padded_input_dims = (input_dims + 31) / 32 * 32;
+        let padded_input_dims = input_dims.div_ceil(32) * 32;
         Self {
             biases: AlignedBuffer::new(output_dims),
             weights: AlignedBuffer::new(output_dims * padded_input_dims),
@@ -63,8 +63,12 @@ impl AffineTransform {
 
                 for c in 0..num_chunks {
                     let in_ptr = input.as_ptr().add(c * 32);
-                    // Input is from AlignedBuffer - use aligned load
                     let input_vec = _mm256_load_si256(in_ptr as *const _);
+
+                    // Optimization: Skip chunk if all inputs are zero
+                    if _mm256_testz_si256(input_vec, input_vec) == 1 {
+                        continue;
+                    }
 
                     let w0 = _mm256_load_si256(w_ptr0.add(c * 32) as *const _);
                     let w1 = _mm256_load_si256(w_ptr1.add(c * 32) as *const _);
@@ -102,6 +106,11 @@ impl AffineTransform {
                     for c in 0..num_chunks {
                         let in_ptr = input.as_ptr().add(c * 32);
                         let input_vec = _mm256_load_si256(in_ptr as *const _);
+
+                        if _mm256_testz_si256(input_vec, input_vec) == 1 {
+                            continue;
+                        }
+
                         let w = _mm256_load_si256(w_ptr.add(c * 32) as *const _);
                         let p = _mm256_maddubs_epi16(input_vec, w);
                         let s = _mm256_madd_epi16(p, ones);
@@ -140,18 +149,17 @@ impl Layer for AffineTransform {
         // Fallback implementation (row-major weights)
         output.copy_from_slice(&self.biases);
 
-        for i in 0..self.input_dims {
-            let in_val = input[i];
+        for (i, &in_val) in input.iter().enumerate().take(self.input_dims) {
             if in_val == 0 {
                 continue;
             }
             let in_val_i32 = in_val as i32;
 
-            for j in 0..self.output_dims {
+            for (j, out_val) in output.iter_mut().enumerate().take(self.output_dims) {
                 // weights[j][i]
                 let weight_idx = j * self.padded_input_dims + i;
                 let w = self.weights[weight_idx] as i32;
-                output[j] += w * in_val_i32;
+                *out_val += w * in_val_i32;
             }
         }
     }
