@@ -1,7 +1,9 @@
 use crate::accumulator::Accumulator;
 use crate::aligned::AlignedBuffer;
 use crate::feature_transformer::FeatureTransformer;
-use crate::layers::{AffineTransform, ClippedReLU, Layer, SqrClippedReLU};
+use crate::layers::{
+    AffineTransform, AffineTransformSparseInput, ClippedReLU, Layer, SqrClippedReLU,
+};
 use crate::{OUTPUT_SCALE, WEIGHT_SCALE_BITS};
 use std::fs::File;
 use std::io::{self, BufReader, Read};
@@ -33,7 +35,7 @@ impl NnueNetworks {
 
 pub struct Network {
     pub feature_transformer: FeatureTransformer,
-    pub fc_0: Vec<AffineTransform>,
+    pub fc_0: Vec<AffineTransformSparseInput>,
     pub fc_1: Vec<AffineTransform>,
     pub fc_2: Vec<AffineTransform>,
     pub ac_sqr_0: SqrClippedReLU,
@@ -126,9 +128,8 @@ impl Network {
             let _hash_stack = crate::loader::read_little_endian_u32(&mut reader)?;
 
             // fc_0
-            let mut fc_0_layer = AffineTransform::new(half_dims, l2 + 1);
+            let mut fc_0_layer = AffineTransformSparseInput::new(half_dims, l2 + 1);
             fc_0_layer.read_parameters(&mut reader)?;
-            permute_fc_weights(&mut fc_0_layer);
 
             // fc_1
             let mut fc_1_layer = AffineTransform::new(l2 * 2, l3);
@@ -320,55 +321,4 @@ impl Network {
 
         (psqt / OUTPUT_SCALE, positional / OUTPUT_SCALE)
     }
-}
-
-fn get_permutation_map(dims: usize) -> Vec<usize> {
-    let mut map = vec![0; dims];
-    for (i, m) in map.iter_mut().enumerate().take(dims) {
-        let c = i / 32;
-        let byte = i % 32;
-        let k = c / 2;
-        let r = c % 2;
-
-        let (block_a, block_b) = if r == 0 {
-            (4 * k, 4 * k + 2)
-        } else {
-            (4 * k + 1, 4 * k + 3)
-        };
-
-        // Map output byte index to original feature index
-        let feature_idx = if byte < 8 {
-            block_a * 16 + byte
-        } else if byte < 16 {
-            block_b * 16 + (byte - 8)
-        } else if byte < 24 {
-            block_a * 16 + (byte - 16) + 8
-        } else {
-            block_b * 16 + (byte - 24) + 8
-        };
-        *m = feature_idx;
-    }
-    map
-}
-
-fn permute_fc_weights(layer: &mut AffineTransform) {
-    let map = get_permutation_map(layer.input_dims);
-    let rows = layer.output_dims;
-    let cols = layer.padded_input_dims;
-
-    let mut new_weights = vec![0i8; layer.weights.len()];
-    let old_weights = &layer.weights;
-
-    for r in 0..rows {
-        let row_offset = r * cols;
-        for c in 0..layer.input_dims {
-            new_weights[row_offset + c] = old_weights[row_offset + map[c]];
-        }
-        // Copy padding if any
-        for c in layer.input_dims..cols {
-            new_weights[row_offset + c] = old_weights[row_offset + c];
-        }
-    }
-
-    layer.weights = AlignedBuffer::from_vec(new_weights);
 }

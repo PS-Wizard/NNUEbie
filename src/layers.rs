@@ -174,7 +174,194 @@ impl Layer for AffineTransform {
     }
 }
 
-pub type AffineTransformSparseInput = AffineTransform;
+fn get_fc_permutation_map(dims: usize) -> Vec<usize> {
+    let mut map = vec![0; dims];
+    for (i, m) in map.iter_mut().enumerate().take(dims) {
+        let c = i / 32;
+        let byte = i % 32;
+        let k = c / 2;
+        let r = c % 2;
+
+        let (block_a, block_b) = if r == 0 {
+            (4 * k, 4 * k + 2)
+        } else {
+            (4 * k + 1, 4 * k + 3)
+        };
+
+        let feature_idx = if byte < 8 {
+            block_a * 16 + byte
+        } else if byte < 16 {
+            block_b * 16 + (byte - 8)
+        } else if byte < 24 {
+            block_a * 16 + (byte - 16) + 8
+        } else {
+            block_b * 16 + (byte - 24) + 8
+        };
+        *m = feature_idx;
+    }
+    map
+}
+
+fn permute_fc_weights_data(
+    input_dims: usize,
+    padded_input_dims: usize,
+    output_dims: usize,
+    weights: &[i8],
+) -> Vec<i8> {
+    let map = get_fc_permutation_map(input_dims);
+    let mut permuted = vec![0i8; output_dims * padded_input_dims];
+
+    for r in 0..output_dims {
+        let row_offset = r * padded_input_dims;
+        for c in 0..input_dims {
+            permuted[row_offset + c] = weights[row_offset + map[c]];
+        }
+        permuted[(row_offset + input_dims)..(row_offset + padded_input_dims)]
+            .copy_from_slice(&weights[(row_offset + input_dims)..(row_offset + padded_input_dims)]);
+    }
+
+    permuted
+}
+
+fn get_weight_index_scrambled(i: usize, padded_input_dims: usize, output_dims: usize) -> usize {
+    let chunk_size = 4;
+    (i / chunk_size) % (padded_input_dims / chunk_size) * output_dims * chunk_size
+        + i / padded_input_dims * chunk_size
+        + i % chunk_size
+}
+
+pub struct AffineTransformSparseInput {
+    pub biases: AlignedBuffer<i32>,
+    pub weights: AlignedBuffer<i8>,
+    pub input_dims: usize,
+    pub output_dims: usize,
+    pub padded_input_dims: usize,
+}
+
+impl AffineTransformSparseInput {
+    pub fn new(input_dims: usize, output_dims: usize) -> Self {
+        let padded_input_dims = input_dims.div_ceil(32) * 32;
+        Self {
+            biases: AlignedBuffer::new(output_dims),
+            weights: AlignedBuffer::new(output_dims * padded_input_dims),
+            input_dims,
+            output_dims,
+            padded_input_dims,
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn add_dpbusd(acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
+        let product = _mm256_maddubs_epi16(a, b);
+        let summed = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
+        _mm256_add_epi32(acc, summed)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn propagate_avx2(&self, input: &[u8], output: &mut [i32]) {
+        debug_assert_eq!(input.len(), self.input_dims);
+        debug_assert_eq!(output.len(), self.output_dims);
+        debug_assert_eq!(self.output_dims % 8, 0);
+
+        let num_chunks = self.padded_input_dims / 4;
+        let input32 = input.as_ptr() as *const i32;
+
+        let bias_ptr = self.biases.as_ptr() as *const __m256i;
+        let mut acc0 = _mm256_load_si256(bias_ptr);
+        let mut acc1 = _mm256_load_si256(bias_ptr.add(1));
+
+        let weights_ptr = self.weights.as_ptr();
+        let block_stride = self.output_dims * 4;
+
+        for i in 0..num_chunks {
+            let in_val = *input32.add(i);
+            if in_val == 0 {
+                continue;
+            }
+
+            let in_vec = _mm256_set1_epi32(in_val);
+            let col_ptr = weights_ptr.add(i * block_stride);
+
+            let w0 = _mm256_load_si256(col_ptr as *const __m256i);
+            let w1 = _mm256_load_si256(col_ptr.add(32) as *const __m256i);
+
+            acc0 = Self::add_dpbusd(acc0, in_vec, w0);
+            acc1 = Self::add_dpbusd(acc1, in_vec, w1);
+        }
+
+        let out_ptr = output.as_mut_ptr() as *mut __m256i;
+        _mm256_store_si256(out_ptr, acc0);
+        _mm256_store_si256(out_ptr.add(1), acc1);
+    }
+}
+
+impl Layer for AffineTransformSparseInput {
+    type Input = u8;
+    type Output = i32;
+
+    fn propagate(&self, input: &[u8], output: &mut [i32]) {
+        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
+        unsafe {
+            return self.propagate_avx2(input, output);
+        }
+
+        #[cfg(all(
+            target_arch = "x86_64",
+            not(feature = "simd_avx2"),
+            not(feature = "simd_scalar")
+        ))]
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                return self.propagate_avx2(input, output);
+            }
+        }
+
+        output.copy_from_slice(&self.biases);
+        for (i, &in_val) in input.iter().enumerate().take(self.input_dims) {
+            if in_val == 0 {
+                continue;
+            }
+            let in_val_i32 = in_val as i32;
+            for (j, out_val) in output.iter_mut().enumerate().take(self.output_dims) {
+                let weight_idx = get_weight_index_scrambled(
+                    j * self.padded_input_dims + i,
+                    self.padded_input_dims,
+                    self.output_dims,
+                );
+                let w = self.weights[weight_idx] as i32;
+                *out_val += w * in_val_i32;
+            }
+        }
+    }
+
+    fn read_parameters<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+        let biases_vec = read_i32_array(reader, self.output_dims)?;
+        self.biases = AlignedBuffer::from_vec(biases_vec);
+
+        let weights_raw = read_i8_array(reader, self.output_dims * self.padded_input_dims)?;
+        let permuted = permute_fc_weights_data(
+            self.input_dims,
+            self.padded_input_dims,
+            self.output_dims,
+            &weights_raw,
+        );
+
+        let mut scrambled = vec![0i8; self.output_dims * self.padded_input_dims];
+        for (i, &weight) in permuted
+            .iter()
+            .enumerate()
+            .take(self.output_dims * self.padded_input_dims)
+        {
+            let idx = get_weight_index_scrambled(i, self.padded_input_dims, self.output_dims);
+            scrambled[idx] = weight;
+        }
+
+        self.weights = AlignedBuffer::from_vec(scrambled);
+        Ok(())
+    }
+}
 
 pub struct ClippedReLU {
     pub dims: usize,
