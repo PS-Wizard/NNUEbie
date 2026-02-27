@@ -17,6 +17,8 @@ pub struct NNUEProbe {
     piece_count: usize,
     pawn_count: [i32; 2],
     non_pawn_material: [i32; 2],
+    by_color_bb: [u64; 2],
+    by_type_bb: [u64; 6],
     accumulator_stack: AccumulatorStack,
     finny_tables: FinnyTables,
 }
@@ -48,6 +50,8 @@ impl NNUEProbe {
             piece_count: 0,
             pawn_count: [0; 2],
             non_pawn_material: [0; 2],
+            by_color_bb: [0; 2],
+            by_type_bb: [0; 6],
             accumulator_stack: AccumulatorStack::new(),
             finny_tables,
         })
@@ -61,6 +65,8 @@ impl NNUEProbe {
         self.pawn_count = [0; 2];
         self.non_pawn_material = [0; 2];
         self.king_squares = [0; 2];
+        self.by_color_bb = [0; 2];
+        self.by_type_bb = [0; 6];
         self.accumulator_stack.reset();
 
         // Note: We DO NOT clear Finny Tables here!
@@ -78,13 +84,14 @@ impl NNUEProbe {
         // Use incremental update which leverages Finny Tables
         // This handles both fresh updates (diff against empty cache) and
         // repeated positions (diff against cached cache) efficiently.
-        let pieces_snapshot = self.pieces;
+        let color_bb = self.by_color_bb;
+        let type_bb = self.by_type_bb;
         self.accumulator_stack.update_incremental(
             self.king_squares,
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,
             &mut self.finny_tables,
-            |list| collect_pieces_from(&pieces_snapshot, list),
+            || (color_bb, type_bb),
         );
     }
 
@@ -117,6 +124,15 @@ impl NNUEProbe {
         self.piece_count += 1;
 
         if let Some(color) = piece.color() {
+            let pt = piece.piece_type();
+            if pt > 0 {
+                let mask = 1u64 << square;
+                self.by_color_bb[color.index()] |= mask;
+                self.by_type_bb[pt - 1] |= mask;
+            }
+        }
+
+        if let Some(color) = piece.color() {
             let c = color.index();
             if piece.piece_type() == 1 {
                 // Pawn
@@ -137,6 +153,15 @@ impl NNUEProbe {
 
         self.pieces[square] = Piece::None;
         self.piece_count -= 1;
+
+        if let Some(color) = piece.color() {
+            let pt = piece.piece_type();
+            if pt > 0 {
+                let mask = !(1u64 << square);
+                self.by_color_bb[color.index()] &= mask;
+                self.by_type_bb[pt - 1] &= mask;
+            }
+        }
 
         if let Some(color) = piece.color() {
             let c = color.index();
@@ -206,13 +231,14 @@ impl NNUEProbe {
         // Or we can pass a closure/iterator? No, lifetime issues.
         // Let's gather. It's 64 iterations, branchless-ish.
 
-        let pieces_snapshot = self.pieces;
+        let color_bb = self.by_color_bb;
+        let type_bb = self.by_type_bb;
         self.accumulator_stack.update_incremental(
             self.king_squares,
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,
             &mut self.finny_tables,
-            |list| collect_pieces_from(&pieces_snapshot, list),
+            || (color_bb, type_bb),
         );
     }
 

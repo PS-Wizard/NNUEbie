@@ -1,7 +1,7 @@
 use crate::accumulator::Accumulator;
 use crate::feature_transformer::{FeatureTransformer, PSQT_BUCKETS};
 use crate::features::make_index;
-use crate::types::{Piece, Square};
+use crate::types::Piece;
 
 #[repr(align(64))]
 #[derive(Clone)]
@@ -97,12 +97,21 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
         ft: &FeatureTransformer,
         _king_squares: [usize; 2],
     ) {
+        let (current_color_bb, current_type_bb) = build_bitboards(pieces);
         let mut temp_acc = Accumulator::<SIZE>::new();
         for king_sq in 0..64 {
             for c in 0..2 {
                 self.entries[king_sq][c].clear(&ft.biases);
                 temp_acc.accumulation[c].copy_from_slice(&ft.biases);
-                update_accumulator_refresh_cache(ft, &mut temp_acc, self, c, king_sq, pieces);
+                update_accumulator_refresh_cache(
+                    ft,
+                    &mut temp_acc,
+                    self,
+                    c,
+                    king_sq,
+                    &current_color_bb,
+                    &current_type_bb,
+                );
             }
         }
     }
@@ -151,17 +160,7 @@ fn pop_lsb(b: &mut u64) -> usize {
     s as usize
 }
 
-/// Updates the accumulator cache entry and the target accumulator
-pub fn update_accumulator_refresh_cache<const SIZE: usize>(
-    ft: &FeatureTransformer,
-    accumulator: &mut Accumulator<SIZE>,
-    cache: &mut AccumulatorCache<SIZE>,
-    perspective: usize,
-    ksq: usize,
-    pieces: &[(Square, usize)],
-) {
-    let entry = &mut cache.entries[ksq][perspective];
-
+fn build_bitboards(pieces: &[(usize, usize)]) -> ([u64; 2], [u64; 6]) {
     let mut current_color_bb = [0u64; 2];
     let mut current_type_bb = [0u64; 6];
 
@@ -175,6 +174,24 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
             }
         }
     }
+
+    (current_color_bb, current_type_bb)
+}
+
+/// Updates the accumulator cache entry and the target accumulator
+pub fn update_accumulator_refresh_cache<const SIZE: usize>(
+    ft: &FeatureTransformer,
+    accumulator: &mut Accumulator<SIZE>,
+    cache: &mut AccumulatorCache<SIZE>,
+    perspective: usize,
+    ksq: usize,
+    current_color_bb: &[u64; 2],
+    current_type_bb: &[u64; 6],
+) {
+    let entry = &mut cache.entries[ksq][perspective];
+
+    let current_color_bb = *current_color_bb;
+    let current_type_bb = *current_type_bb;
 
     let mut added: [usize; 32] = [0; 32];
     let mut removed: [usize; 32] = [0; 32];

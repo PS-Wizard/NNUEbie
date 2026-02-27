@@ -1,7 +1,6 @@
 use crate::accumulator::Accumulator;
 use crate::feature_transformer::FeatureTransformer;
 use crate::finny_tables::FinnyTables;
-use crate::piece_list::PieceList;
 
 const MAX_PLY: usize = 128;
 
@@ -82,7 +81,6 @@ impl AccumulatorState {
 pub struct AccumulatorStack {
     stack: Vec<AccumulatorState>,
     current_idx: usize,
-    piece_scratch: PieceList,
 }
 
 impl Default for AccumulatorStack {
@@ -98,7 +96,6 @@ impl AccumulatorStack {
         Self {
             stack,
             current_idx: 1,
-            piece_scratch: PieceList::new(),
         }
     }
 
@@ -154,14 +151,29 @@ impl AccumulatorStack {
         ft_big: &FeatureTransformer,
         ft_small: &FeatureTransformer,
         caches: &mut FinnyTables,
-        pieces_provider: F,
+        bitboards_provider: F,
     ) where
-        F: FnOnce(&mut PieceList),
+        F: FnOnce() -> ([u64; 2], [u64; 6]),
     {
-        let mut provider = Some(pieces_provider);
+        let mut bitboards: Option<([u64; 2], [u64; 6])> = None;
+        let mut provider = Some(bitboards_provider);
 
-        self.evaluate_side::<0, F>(king_squares[0], ft_big, ft_small, caches, &mut provider);
-        self.evaluate_side::<1, F>(king_squares[1], ft_big, ft_small, caches, &mut provider);
+        self.evaluate_side::<0, F>(
+            king_squares[0],
+            ft_big,
+            ft_small,
+            caches,
+            &mut bitboards,
+            &mut provider,
+        );
+        self.evaluate_side::<1, F>(
+            king_squares[1],
+            ft_big,
+            ft_small,
+            caches,
+            &mut bitboards,
+            &mut provider,
+        );
     }
 
     fn evaluate_side<const P: usize, F>(
@@ -170,9 +182,10 @@ impl AccumulatorStack {
         ft_big: &FeatureTransformer,
         ft_small: &FeatureTransformer,
         caches: &mut FinnyTables,
+        bitboards: &mut Option<([u64; 2], [u64; 6])>,
         provider: &mut Option<F>,
     ) where
-        F: FnOnce(&mut PieceList),
+        F: FnOnce() -> ([u64; 2], [u64; 6]),
     {
         let last_usable = self.find_last_usable_accumulator(P);
 
@@ -180,7 +193,7 @@ impl AccumulatorStack {
             self.forward_update_incremental::<P>(last_usable, ksq, ft_big, ft_small);
         } else {
             // Need refresh from cache
-            let pieces = Self::get_pieces(&mut self.piece_scratch, provider);
+            let (current_color_bb, current_type_bb) = Self::get_bitboards(bitboards, provider);
             let current = &mut self.stack[self.current_idx - 1];
 
             // Big network
@@ -190,7 +203,8 @@ impl AccumulatorStack {
                 &mut caches.cache_big,
                 P,
                 ksq,
-                pieces,
+                current_color_bb,
+                current_type_bb,
             );
 
             // Small network
@@ -200,7 +214,8 @@ impl AccumulatorStack {
                 &mut caches.cache_small,
                 P,
                 ksq,
-                pieces,
+                current_color_bb,
+                current_type_bb,
             );
 
             current.computed[P] = true;
@@ -210,18 +225,21 @@ impl AccumulatorStack {
         }
     }
 
-    fn get_pieces<'a, F>(
-        piece_scratch: &'a mut PieceList,
+    fn get_bitboards<'a, F>(
+        bitboards: &'a mut Option<([u64; 2], [u64; 6])>,
         provider: &mut Option<F>,
-    ) -> &'a [(usize, usize)]
+    ) -> (&'a [u64; 2], &'a [u64; 6])
     where
-        F: FnOnce(&mut PieceList),
+        F: FnOnce() -> ([u64; 2], [u64; 6]),
     {
-        if let Some(build) = provider.take() {
-            piece_scratch.clear();
-            build(piece_scratch);
+        if bitboards.is_none() {
+            let build = provider
+                .take()
+                .expect("bitboards provider should be used at most once");
+            *bitboards = Some(build());
         }
-        piece_scratch.as_slice()
+        let (ref color, ref typ) = bitboards.as_ref().expect("bitboards should be available");
+        (color, typ)
     }
 
     fn find_last_usable_accumulator(&self, perspective: usize) -> usize {
