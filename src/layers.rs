@@ -47,6 +47,24 @@ impl AffineTransform {
     unsafe fn propagate_avx2(&self, input: &[u8], output: &mut [i32]) {
         let num_chunks = self.padded_input_dims / 32;
 
+        if self.output_dims == 1 {
+            let mut acc = _mm256_setzero_si256();
+            let w_ptr = self.weights.as_ptr();
+            let ones = _mm256_set1_epi16(1);
+
+            for c in 0..num_chunks {
+                let in_ptr = input.as_ptr().add(c * 32);
+                let input_vec = _mm256_load_si256(in_ptr as *const _);
+                let w = _mm256_load_si256(w_ptr.add(c * 32) as *const _);
+                let p = _mm256_maddubs_epi16(input_vec, w);
+                let s = _mm256_madd_epi16(p, ones);
+                acc = _mm256_add_epi32(acc, s);
+            }
+
+            output[0] = hsum_256(acc) + self.biases[0];
+            return;
+        }
+
         for r in (0..self.output_dims).step_by(4) {
             let left = self.output_dims - r;
             if left >= 4 {
