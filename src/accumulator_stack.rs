@@ -76,6 +76,14 @@ impl AccumulatorState {
         self.computed = [false, false];
         self.rule50 = rule50;
     }
+
+    pub fn clear_root(&mut self, rule50: i32) {
+        self.dirty_piece.reset();
+        self.computed = [false, false];
+        self.rule50 = rule50;
+        self.acc_big.computed = [false, false];
+        self.acc_small.computed = [false, false];
+    }
 }
 
 pub struct AccumulatorStack {
@@ -127,7 +135,63 @@ impl AccumulatorStack {
 
     pub fn reset(&mut self) {
         self.current_idx = 1;
-        self.stack[0] = AccumulatorState::new();
+        self.stack[0].clear_root(0);
+    }
+
+    pub fn reset_with_refresh(
+        &mut self,
+        king_squares: [usize; 2],
+        ft_big: &FeatureTransformer,
+        ft_small: &FeatureTransformer,
+        caches: &mut FinnyTables,
+        current_color_bb: [u64; 2],
+        current_type_bb: [u64; 6],
+        rule50: i32,
+    ) {
+        self.current_idx = 1;
+        self.stack[0].clear_root(rule50);
+
+        let root = &mut self.stack[0];
+
+        crate::finny_tables::update_accumulator_refresh_cache(
+            ft_big,
+            &mut root.acc_big,
+            &mut caches.cache_big,
+            0,
+            king_squares[0],
+            &current_color_bb,
+            &current_type_bb,
+        );
+        crate::finny_tables::update_accumulator_refresh_cache(
+            ft_big,
+            &mut root.acc_big,
+            &mut caches.cache_big,
+            1,
+            king_squares[1],
+            &current_color_bb,
+            &current_type_bb,
+        );
+
+        crate::finny_tables::update_accumulator_refresh_cache(
+            ft_small,
+            &mut root.acc_small,
+            &mut caches.cache_small,
+            0,
+            king_squares[0],
+            &current_color_bb,
+            &current_type_bb,
+        );
+        crate::finny_tables::update_accumulator_refresh_cache(
+            ft_small,
+            &mut root.acc_small,
+            &mut caches.cache_small,
+            1,
+            king_squares[1],
+            &current_color_bb,
+            &current_type_bb,
+        );
+
+        root.computed = [true, true];
     }
 
     pub fn refresh(

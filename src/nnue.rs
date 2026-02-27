@@ -67,31 +67,24 @@ impl NNUEProbe {
         self.king_squares = [0; 2];
         self.by_color_bb = [0; 2];
         self.by_type_bb = [0; 6];
-        self.accumulator_stack.reset();
 
         // Note: We DO NOT clear Finny Tables here!
         // Stockfish persists the cache across positions.
         // Clearing it would force a full refresh on every node, killing performance.
         // The cache will correct itself lazily when a king lands on a square.
 
-        // Set rule50 on the root state
-        self.accumulator_stack.state_at_mut(0).rule50 = rule50;
-
         for &(piece, square) in pieces {
             self.add_piece_internal(piece, square);
         }
 
-        // Use incremental update which leverages Finny Tables
-        // This handles both fresh updates (diff against empty cache) and
-        // repeated positions (diff against cached cache) efficiently.
-        let color_bb = self.by_color_bb;
-        let type_bb = self.by_type_bb;
-        self.accumulator_stack.update_incremental(
+        self.accumulator_stack.reset_with_refresh(
             self.king_squares,
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,
             &mut self.finny_tables,
-            || (color_bb, type_bb),
+            self.by_color_bb,
+            self.by_type_bb,
+            rule50,
         );
     }
 
@@ -224,13 +217,7 @@ impl NNUEProbe {
         self.accumulator_stack.push(&dirty, new_rule50);
 
         // Update accums incrementally (unless king moved)
-        // Note: update_incremental now handles King moves internally via Finny Tables!
-        // We just need to gather current pieces for potential cache refresh.
-        // Optimization: We could only gather pieces IF cache refresh is actually needed,
-        // but that requires exposing find_last_usable logic. For now, we gather.
-        // Or we can pass a closure/iterator? No, lifetime issues.
-        // Let's gather. It's 64 iterations, branchless-ish.
-
+        // Note: update_incremental now handles King moves internally via Finny Tables.
         let color_bb = self.by_color_bb;
         let type_bb = self.by_type_bb;
         self.accumulator_stack.update_incremental(
