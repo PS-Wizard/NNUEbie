@@ -58,7 +58,7 @@ impl ScratchBuffer {
             transformed_features: AlignedBuffer::new(half_dims),
             fc_0_out: AlignedBuffer::new(16), // L2 + 1
             ac_0_out: AlignedBuffer::new(16), // L2 + 1
-            fc_1_in: AlignedBuffer::new(30),  // L2 * 2
+            fc_1_in: AlignedBuffer::new(32),  // L2 * 2, padded to 32 for AVX2
             fc_1_out: AlignedBuffer::new(32), // L3
             ac_1_out: AlignedBuffer::new(32), // L3
             fc_2_out: AlignedBuffer::new(1),  // 1
@@ -302,6 +302,7 @@ impl Network {
         self.ac_0
             .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
         scratch.fc_1_in[15..30].copy_from_slice(&scratch.ac_0_out[0..15]);
+        scratch.fc_1_in[30..32].fill(0);
 
         fc_1.propagate(&scratch.fc_1_in, &mut scratch.fc_1_out);
 

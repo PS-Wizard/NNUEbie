@@ -89,7 +89,7 @@ impl<T> AlignedBuffer<T> {
         T: Copy,
     {
         unsafe {
-            ptr::write_bytes(self.ptr.as_ptr(), 0, self.len * std::mem::size_of::<T>());
+            ptr::write_bytes(self.ptr.as_ptr(), 0, self.len);
         }
     }
 
