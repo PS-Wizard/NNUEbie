@@ -145,26 +145,48 @@ impl AccumulatorStack {
 
     /// Update incrementally using the Finny Tables cache if needed
     /// This is the main update entry point, equivalent to Stockfish's evaluate
-    pub fn update_incremental(
+    pub fn update_incremental<F>(
         &mut self,
         king_squares: [usize; 2],
         ft_big: &FeatureTransformer,
         ft_small: &FeatureTransformer,
         caches: &mut FinnyTables,
-        pieces: &[(usize, usize)], // Needed for cache refresh
-    ) {
-        self.evaluate_side::<0>(king_squares[0], ft_big, ft_small, caches, pieces);
-        self.evaluate_side::<1>(king_squares[1], ft_big, ft_small, caches, pieces);
+        pieces_provider: F,
+    ) where
+        F: FnOnce() -> Vec<(usize, usize)>,
+    {
+        let mut pieces: Option<Vec<(usize, usize)>> = None;
+        let mut provider = Some(pieces_provider);
+
+        self.evaluate_side::<0, F>(
+            king_squares[0],
+            ft_big,
+            ft_small,
+            caches,
+            &mut pieces,
+            &mut provider,
+        );
+        self.evaluate_side::<1, F>(
+            king_squares[1],
+            ft_big,
+            ft_small,
+            caches,
+            &mut pieces,
+            &mut provider,
+        );
     }
 
-    fn evaluate_side<const P: usize>(
+    fn evaluate_side<const P: usize, F>(
         &mut self,
         ksq: usize,
         ft_big: &FeatureTransformer,
         ft_small: &FeatureTransformer,
         caches: &mut FinnyTables,
-        pieces: &[(usize, usize)],
-    ) {
+        pieces: &mut Option<Vec<(usize, usize)>>,
+        provider: &mut Option<F>,
+    ) where
+        F: FnOnce() -> Vec<(usize, usize)>,
+    {
         let last_usable = self.find_last_usable_accumulator(P);
 
         if self.stack[last_usable].computed[P] {
@@ -172,6 +194,7 @@ impl AccumulatorStack {
         } else {
             // Need refresh from cache
             let current = &mut self.stack[self.current_idx - 1];
+            let pieces = Self::get_pieces(pieces, provider);
 
             // Big network
             crate::finny_tables::update_accumulator_refresh_cache(
@@ -198,6 +221,22 @@ impl AccumulatorStack {
             // Backward propagation to fill gaps
             self.backward_update_incremental::<P>(last_usable, ksq, ft_big, ft_small);
         }
+    }
+
+    fn get_pieces<'a, F>(
+        pieces: &'a mut Option<Vec<(usize, usize)>>,
+        provider: &mut Option<F>,
+    ) -> &'a [(usize, usize)]
+    where
+        F: FnOnce() -> Vec<(usize, usize)>,
+    {
+        if pieces.is_none() {
+            let build = provider
+                .take()
+                .expect("pieces provider should be used at most once");
+            *pieces = Some(build());
+        }
+        pieces.as_ref().expect("pieces should be available")
     }
 
     fn find_last_usable_accumulator(&self, perspective: usize) -> usize {

@@ -20,6 +20,17 @@ pub struct NNUEProbe {
     finny_tables: FinnyTables,
 }
 
+fn collect_pieces_from(pieces: &[Piece; 64]) -> Vec<(usize, usize)> {
+    let mut all_pieces: Vec<(usize, usize)> = Vec::with_capacity(32);
+    for sq in 0..64 {
+        let p = pieces[sq];
+        if p != Piece::None {
+            all_pieces.push((sq, p.index()));
+        }
+    }
+    all_pieces
+}
+
 impl NNUEProbe {
     pub fn new(big_path: &str, small_path: &str) -> io::Result<Self> {
         let networks = Arc::new(NnueNetworks::new(big_path, small_path)?);
@@ -77,20 +88,13 @@ impl NNUEProbe {
         // Use incremental update which leverages Finny Tables
         // This handles both fresh updates (diff against empty cache) and
         // repeated positions (diff against cached cache) efficiently.
-        let mut all_pieces: Vec<(usize, usize)> = Vec::with_capacity(32);
-        for sq in 0..64 {
-            let p = self.pieces[sq];
-            if p != Piece::None {
-                all_pieces.push((sq, p.index()));
-            }
-        }
-
+        let pieces_snapshot = self.pieces;
         self.accumulator_stack.update_incremental(
             self.king_squares,
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,
             &mut self.finny_tables,
-            &all_pieces,
+            || collect_pieces_from(&pieces_snapshot),
         );
     }
 
@@ -218,20 +222,13 @@ impl NNUEProbe {
         // Or we can pass a closure/iterator? No, lifetime issues.
         // Let's gather. It's 64 iterations, branchless-ish.
 
-        let mut all_pieces: Vec<(usize, usize)> = Vec::with_capacity(32);
-        for sq in 0..64 {
-            let p = self.pieces[sq];
-            if p != Piece::None {
-                all_pieces.push((sq, p.index()));
-            }
-        }
-
+        let pieces_snapshot = self.pieces;
         self.accumulator_stack.update_incremental(
             self.king_squares,
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,
             &mut self.finny_tables,
-            &all_pieces,
+            || collect_pieces_from(&pieces_snapshot),
         );
     }
 
