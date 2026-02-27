@@ -1,12 +1,41 @@
 use crate::accumulator::Accumulator;
-use crate::aligned::AlignedBuffer;
 use crate::feature_transformer::{FeatureTransformer, PSQT_BUCKETS};
 use crate::features::make_index;
 use crate::types::{Piece, Square};
 
+#[repr(align(64))]
+#[derive(Clone)]
+pub struct AlignedI16<const N: usize> {
+    data: [i16; N],
+}
+
+impl<const N: usize> AlignedI16<N> {
+    fn new() -> Self {
+        Self { data: [0; N] }
+    }
+
+    fn as_slice(&self) -> &[i16] {
+        &self.data
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [i16] {
+        &mut self.data
+    }
+
+    fn copy_from_slice(&mut self, src: &[i16]) {
+        self.data.copy_from_slice(src);
+    }
+}
+
+impl<const N: usize> Default for AlignedI16<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone)]
 pub struct AccumulatorCacheEntry<const SIZE: usize> {
-    pub accumulation: AlignedBuffer<i16>,
+    pub accumulation: AlignedI16<SIZE>,
     pub psqt_accumulation: [i32; PSQT_BUCKETS],
     pub by_color_bb: [u64; 2],
     pub by_type_bb: [u64; 6], // Pawn to King (0-5)
@@ -21,7 +50,7 @@ impl<const SIZE: usize> Default for AccumulatorCacheEntry<SIZE> {
 impl<const SIZE: usize> AccumulatorCacheEntry<SIZE> {
     pub fn new() -> Self {
         Self {
-            accumulation: AlignedBuffer::new(SIZE),
+            accumulation: AlignedI16::new(),
             psqt_accumulation: [0; PSQT_BUCKETS],
             by_color_bb: [0; 2],
             by_type_bb: [0; 6],
@@ -68,10 +97,10 @@ impl<const SIZE: usize> AccumulatorCache<SIZE> {
         ft: &FeatureTransformer,
         _king_squares: [usize; 2],
     ) {
+        let mut temp_acc = Accumulator::<SIZE>::new();
         for king_sq in 0..64 {
             for c in 0..2 {
                 self.entries[king_sq][c].clear(&ft.biases);
-                let mut temp_acc = Accumulator::<SIZE>::new();
                 temp_acc.accumulation[c].copy_from_slice(&ft.biases);
                 update_accumulator_refresh_cache(ft, &mut temp_acc, self, c, king_sq, pieces);
             }
@@ -215,17 +244,17 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
         for &feat_idx in removed_slice {
             let w = get_weight(feat_idx);
             for (j, &val) in w.iter().enumerate().take(SIZE) {
-                entry.accumulation[j] -= val;
+                entry.accumulation.as_mut_slice()[j] -= val;
             }
         }
         for &feat_idx in added_slice {
             let w = get_weight(feat_idx);
             for (j, &val) in w.iter().enumerate().take(SIZE) {
-                entry.accumulation[j] += val;
+                entry.accumulation.as_mut_slice()[j] += val;
             }
         }
         // Copy to accumulator
-        accumulator.accumulation[perspective].copy_from_slice(&entry.accumulation);
+        accumulator.accumulation[perspective].copy_from_slice(entry.accumulation.as_slice());
     }
 
     // Always update PSQT (scalar loop is fine, it's small)
