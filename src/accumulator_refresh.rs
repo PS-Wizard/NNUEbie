@@ -98,6 +98,60 @@ pub unsafe fn refresh_avx2_3072(
     }
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+#[allow(clippy::identity_op, clippy::erasing_op)]
+/// # Safety
+/// Requires AVX512F/BW and 64-byte aligned `acc`, `biases`, and `weights` slices sized for 3072 dims.
+#[target_feature(enable = "avx512f,avx512bw")]
+pub unsafe fn refresh_avx512_3072(
+    acc: &mut [i16],
+    biases: &[i16],
+    weights: &AlignedBuffer<i16>,
+    feature_indices: &[usize],
+) {
+    let acc_ptr = acc.as_mut_ptr();
+    let bias_ptr = biases.as_ptr();
+    let weight_base = weights.as_ptr();
+
+    // 3072 dims, 12 tiles of 256 elements, 8 ZMM registers per tile
+    for tile_idx in 0..12 {
+        let offset = tile_idx * 256;
+        let tile_bias_ptr = bias_ptr.add(offset);
+
+        let mut r00 = _mm512_load_si512(tile_bias_ptr.add(0 * 32) as *const _);
+        let mut r01 = _mm512_load_si512(tile_bias_ptr.add(1 * 32) as *const _);
+        let mut r02 = _mm512_load_si512(tile_bias_ptr.add(2 * 32) as *const _);
+        let mut r03 = _mm512_load_si512(tile_bias_ptr.add(3 * 32) as *const _);
+        let mut r04 = _mm512_load_si512(tile_bias_ptr.add(4 * 32) as *const _);
+        let mut r05 = _mm512_load_si512(tile_bias_ptr.add(5 * 32) as *const _);
+        let mut r06 = _mm512_load_si512(tile_bias_ptr.add(6 * 32) as *const _);
+        let mut r07 = _mm512_load_si512(tile_bias_ptr.add(7 * 32) as *const _);
+
+        for &idx in feature_indices {
+            let w_ptr = weight_base.add(idx * 3072 + offset);
+
+            r00 = _mm512_add_epi16(r00, _mm512_load_si512(w_ptr.add(0 * 32) as *const _));
+            r01 = _mm512_add_epi16(r01, _mm512_load_si512(w_ptr.add(1 * 32) as *const _));
+            r02 = _mm512_add_epi16(r02, _mm512_load_si512(w_ptr.add(2 * 32) as *const _));
+            r03 = _mm512_add_epi16(r03, _mm512_load_si512(w_ptr.add(3 * 32) as *const _));
+            r04 = _mm512_add_epi16(r04, _mm512_load_si512(w_ptr.add(4 * 32) as *const _));
+            r05 = _mm512_add_epi16(r05, _mm512_load_si512(w_ptr.add(5 * 32) as *const _));
+            r06 = _mm512_add_epi16(r06, _mm512_load_si512(w_ptr.add(6 * 32) as *const _));
+            r07 = _mm512_add_epi16(r07, _mm512_load_si512(w_ptr.add(7 * 32) as *const _));
+        }
+
+        let tile_acc_ptr = acc_ptr.add(offset);
+        _mm512_store_si512(tile_acc_ptr.add(0 * 32) as *mut _, r00);
+        _mm512_store_si512(tile_acc_ptr.add(1 * 32) as *mut _, r01);
+        _mm512_store_si512(tile_acc_ptr.add(2 * 32) as *mut _, r02);
+        _mm512_store_si512(tile_acc_ptr.add(3 * 32) as *mut _, r03);
+        _mm512_store_si512(tile_acc_ptr.add(4 * 32) as *mut _, r04);
+        _mm512_store_si512(tile_acc_ptr.add(5 * 32) as *mut _, r05);
+        _mm512_store_si512(tile_acc_ptr.add(6 * 32) as *mut _, r06);
+        _mm512_store_si512(tile_acc_ptr.add(7 * 32) as *mut _, r07);
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::identity_op, clippy::erasing_op)]
 /// # Safety
@@ -149,6 +203,41 @@ pub unsafe fn refresh_avx2_128(
     _mm256_store_si256(acc_ptr.add(5 * 16) as *mut _, r05);
     _mm256_store_si256(acc_ptr.add(6 * 16) as *mut _, r06);
     _mm256_store_si256(acc_ptr.add(7 * 16) as *mut _, r07);
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+#[allow(clippy::identity_op, clippy::erasing_op)]
+/// # Safety
+/// Requires AVX512F/BW and 64-byte aligned `acc`, `biases`, and `weights` slices sized for 128 dims.
+#[target_feature(enable = "avx512f,avx512bw")]
+pub unsafe fn refresh_avx512_128(
+    acc: &mut [i16],
+    biases: &[i16],
+    weights: &AlignedBuffer<i16>,
+    feature_indices: &[usize],
+) {
+    let acc_ptr = acc.as_mut_ptr();
+    let bias_ptr = biases.as_ptr();
+    let weight_base = weights.as_ptr();
+
+    let mut r00 = _mm512_load_si512(bias_ptr.add(0 * 32) as *const _);
+    let mut r01 = _mm512_load_si512(bias_ptr.add(1 * 32) as *const _);
+    let mut r02 = _mm512_load_si512(bias_ptr.add(2 * 32) as *const _);
+    let mut r03 = _mm512_load_si512(bias_ptr.add(3 * 32) as *const _);
+
+    for &idx in feature_indices {
+        let w_ptr = weight_base.add(idx * 128);
+
+        r00 = _mm512_add_epi16(r00, _mm512_load_si512(w_ptr.add(0 * 32) as *const _));
+        r01 = _mm512_add_epi16(r01, _mm512_load_si512(w_ptr.add(1 * 32) as *const _));
+        r02 = _mm512_add_epi16(r02, _mm512_load_si512(w_ptr.add(2 * 32) as *const _));
+        r03 = _mm512_add_epi16(r03, _mm512_load_si512(w_ptr.add(3 * 32) as *const _));
+    }
+
+    _mm512_store_si512(acc_ptr.add(0 * 32) as *mut _, r00);
+    _mm512_store_si512(acc_ptr.add(1 * 32) as *mut _, r01);
+    _mm512_store_si512(acc_ptr.add(2 * 32) as *mut _, r02);
+    _mm512_store_si512(acc_ptr.add(3 * 32) as *mut _, r03);
 }
 
 /// Update and copy AVX2 - for Finny Table updates
@@ -271,6 +360,80 @@ pub unsafe fn update_and_copy_avx2_3072(
     }
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+#[allow(clippy::identity_op, clippy::erasing_op)]
+/// # Safety
+/// Requires AVX512F/BW and 64-byte aligned `entry`, `acc`, and `weights` slices sized for 3072 dims.
+#[target_feature(enable = "avx512f,avx512bw")]
+pub unsafe fn update_and_copy_avx512_3072(
+    entry: &mut [i16],
+    acc: &mut [i16],
+    weights: &AlignedBuffer<i16>,
+    added: &[usize],
+    removed: &[usize],
+) {
+    let entry_ptr = entry.as_mut_ptr();
+    let acc_ptr = acc.as_mut_ptr();
+    let weight_base = weights.as_ptr();
+
+    for tile_idx in 0..12 {
+        let offset = tile_idx * 256;
+        let tile_entry_ptr = entry_ptr.add(offset);
+        let tile_acc_ptr = acc_ptr.add(offset);
+
+        let mut r00 = _mm512_load_si512(tile_entry_ptr.add(0 * 32) as *const _);
+        let mut r01 = _mm512_load_si512(tile_entry_ptr.add(1 * 32) as *const _);
+        let mut r02 = _mm512_load_si512(tile_entry_ptr.add(2 * 32) as *const _);
+        let mut r03 = _mm512_load_si512(tile_entry_ptr.add(3 * 32) as *const _);
+        let mut r04 = _mm512_load_si512(tile_entry_ptr.add(4 * 32) as *const _);
+        let mut r05 = _mm512_load_si512(tile_entry_ptr.add(5 * 32) as *const _);
+        let mut r06 = _mm512_load_si512(tile_entry_ptr.add(6 * 32) as *const _);
+        let mut r07 = _mm512_load_si512(tile_entry_ptr.add(7 * 32) as *const _);
+
+        for &idx in removed {
+            let w_ptr = weight_base.add(idx * 3072 + offset);
+            r00 = _mm512_sub_epi16(r00, _mm512_load_si512(w_ptr.add(0 * 32) as *const _));
+            r01 = _mm512_sub_epi16(r01, _mm512_load_si512(w_ptr.add(1 * 32) as *const _));
+            r02 = _mm512_sub_epi16(r02, _mm512_load_si512(w_ptr.add(2 * 32) as *const _));
+            r03 = _mm512_sub_epi16(r03, _mm512_load_si512(w_ptr.add(3 * 32) as *const _));
+            r04 = _mm512_sub_epi16(r04, _mm512_load_si512(w_ptr.add(4 * 32) as *const _));
+            r05 = _mm512_sub_epi16(r05, _mm512_load_si512(w_ptr.add(5 * 32) as *const _));
+            r06 = _mm512_sub_epi16(r06, _mm512_load_si512(w_ptr.add(6 * 32) as *const _));
+            r07 = _mm512_sub_epi16(r07, _mm512_load_si512(w_ptr.add(7 * 32) as *const _));
+        }
+
+        for &idx in added {
+            let w_ptr = weight_base.add(idx * 3072 + offset);
+            r00 = _mm512_add_epi16(r00, _mm512_load_si512(w_ptr.add(0 * 32) as *const _));
+            r01 = _mm512_add_epi16(r01, _mm512_load_si512(w_ptr.add(1 * 32) as *const _));
+            r02 = _mm512_add_epi16(r02, _mm512_load_si512(w_ptr.add(2 * 32) as *const _));
+            r03 = _mm512_add_epi16(r03, _mm512_load_si512(w_ptr.add(3 * 32) as *const _));
+            r04 = _mm512_add_epi16(r04, _mm512_load_si512(w_ptr.add(4 * 32) as *const _));
+            r05 = _mm512_add_epi16(r05, _mm512_load_si512(w_ptr.add(5 * 32) as *const _));
+            r06 = _mm512_add_epi16(r06, _mm512_load_si512(w_ptr.add(6 * 32) as *const _));
+            r07 = _mm512_add_epi16(r07, _mm512_load_si512(w_ptr.add(7 * 32) as *const _));
+        }
+
+        _mm512_store_si512(tile_entry_ptr.add(0 * 32) as *mut _, r00);
+        _mm512_store_si512(tile_entry_ptr.add(1 * 32) as *mut _, r01);
+        _mm512_store_si512(tile_entry_ptr.add(2 * 32) as *mut _, r02);
+        _mm512_store_si512(tile_entry_ptr.add(3 * 32) as *mut _, r03);
+        _mm512_store_si512(tile_entry_ptr.add(4 * 32) as *mut _, r04);
+        _mm512_store_si512(tile_entry_ptr.add(5 * 32) as *mut _, r05);
+        _mm512_store_si512(tile_entry_ptr.add(6 * 32) as *mut _, r06);
+        _mm512_store_si512(tile_entry_ptr.add(7 * 32) as *mut _, r07);
+
+        _mm512_store_si512(tile_acc_ptr.add(0 * 32) as *mut _, r00);
+        _mm512_store_si512(tile_acc_ptr.add(1 * 32) as *mut _, r01);
+        _mm512_store_si512(tile_acc_ptr.add(2 * 32) as *mut _, r02);
+        _mm512_store_si512(tile_acc_ptr.add(3 * 32) as *mut _, r03);
+        _mm512_store_si512(tile_acc_ptr.add(4 * 32) as *mut _, r04);
+        _mm512_store_si512(tile_acc_ptr.add(5 * 32) as *mut _, r05);
+        _mm512_store_si512(tile_acc_ptr.add(6 * 32) as *mut _, r06);
+        _mm512_store_si512(tile_acc_ptr.add(7 * 32) as *mut _, r07);
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::identity_op, clippy::erasing_op)]
 /// # Safety
@@ -341,4 +504,52 @@ pub unsafe fn update_and_copy_avx2_128(
     _mm256_store_si256(acc_ptr.add(5 * 16) as *mut _, r05);
     _mm256_store_si256(acc_ptr.add(6 * 16) as *mut _, r06);
     _mm256_store_si256(acc_ptr.add(7 * 16) as *mut _, r07);
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+#[allow(clippy::identity_op, clippy::erasing_op)]
+/// # Safety
+/// Requires AVX512F/BW and 64-byte aligned `entry`, `acc`, and `weights` slices sized for 128 dims.
+#[target_feature(enable = "avx512f,avx512bw")]
+pub unsafe fn update_and_copy_avx512_128(
+    entry: &mut [i16],
+    acc: &mut [i16],
+    weights: &AlignedBuffer<i16>,
+    added: &[usize],
+    removed: &[usize],
+) {
+    let entry_ptr = entry.as_mut_ptr();
+    let acc_ptr = acc.as_mut_ptr();
+    let weight_base = weights.as_ptr();
+
+    let mut r00 = _mm512_load_si512(entry_ptr.add(0 * 32) as *const _);
+    let mut r01 = _mm512_load_si512(entry_ptr.add(1 * 32) as *const _);
+    let mut r02 = _mm512_load_si512(entry_ptr.add(2 * 32) as *const _);
+    let mut r03 = _mm512_load_si512(entry_ptr.add(3 * 32) as *const _);
+
+    for &idx in removed {
+        let w_ptr = weight_base.add(idx * 128);
+        r00 = _mm512_sub_epi16(r00, _mm512_load_si512(w_ptr.add(0 * 32) as *const _));
+        r01 = _mm512_sub_epi16(r01, _mm512_load_si512(w_ptr.add(1 * 32) as *const _));
+        r02 = _mm512_sub_epi16(r02, _mm512_load_si512(w_ptr.add(2 * 32) as *const _));
+        r03 = _mm512_sub_epi16(r03, _mm512_load_si512(w_ptr.add(3 * 32) as *const _));
+    }
+
+    for &idx in added {
+        let w_ptr = weight_base.add(idx * 128);
+        r00 = _mm512_add_epi16(r00, _mm512_load_si512(w_ptr.add(0 * 32) as *const _));
+        r01 = _mm512_add_epi16(r01, _mm512_load_si512(w_ptr.add(1 * 32) as *const _));
+        r02 = _mm512_add_epi16(r02, _mm512_load_si512(w_ptr.add(2 * 32) as *const _));
+        r03 = _mm512_add_epi16(r03, _mm512_load_si512(w_ptr.add(3 * 32) as *const _));
+    }
+
+    _mm512_store_si512(entry_ptr.add(0 * 32) as *mut _, r00);
+    _mm512_store_si512(entry_ptr.add(1 * 32) as *mut _, r01);
+    _mm512_store_si512(entry_ptr.add(2 * 32) as *mut _, r02);
+    _mm512_store_si512(entry_ptr.add(3 * 32) as *mut _, r03);
+
+    _mm512_store_si512(acc_ptr.add(0 * 32) as *mut _, r00);
+    _mm512_store_si512(acc_ptr.add(1 * 32) as *mut _, r01);
+    _mm512_store_si512(acc_ptr.add(2 * 32) as *mut _, r02);
+    _mm512_store_si512(acc_ptr.add(3 * 32) as *mut _, r03);
 }

@@ -34,13 +34,28 @@ impl<const SIZE: usize> Default for Accumulator<SIZE> {
 
 impl<const SIZE: usize> Accumulator<SIZE> {
     pub fn new() -> Self {
+        #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+        let (add_fn, remove_fn, update_fn, refresh_fn) = {
+            let r_fn = if SIZE == 3072 {
+                Some(crate::accumulator_refresh::refresh_avx512_3072 as RefreshFn)
+            } else if SIZE == 128 {
+                Some(crate::accumulator_refresh::refresh_avx512_128 as RefreshFn)
+            } else {
+                None
+            };
+
+            (
+                add_feature_avx2 as FeatureUpdateFn,
+                remove_feature_avx2 as FeatureUpdateFn,
+                update_accumulators_single_pass_avx2 as UpdateSinglePassFn,
+                r_fn,
+            )
+        };
+
         #[cfg(all(
             target_arch = "x86_64",
-            any(
-                feature = "simd_avx2",
-                feature = "simd_avx512",
-                feature = "simd_avx512_vnni"
-            )
+            feature = "simd_avx2",
+            not(feature = "simd_avx512")
         ))]
         let (add_fn, remove_fn, update_fn, refresh_fn) = {
             let r_fn = if SIZE == 3072 {
