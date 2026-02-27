@@ -83,11 +83,6 @@ impl AffineTransform {
                     let in_ptr = input.as_ptr().add(c * 32);
                     let input_vec = _mm256_load_si256(in_ptr as *const _);
 
-                    // Optimization: Skip chunk if all inputs are zero
-                    if _mm256_testz_si256(input_vec, input_vec) == 1 {
-                        continue;
-                    }
-
                     let w0 = _mm256_load_si256(w_ptr0.add(c * 32) as *const _);
                     let w1 = _mm256_load_si256(w_ptr1.add(c * 32) as *const _);
                     let w2 = _mm256_load_si256(w_ptr2.add(c * 32) as *const _);
@@ -124,10 +119,6 @@ impl AffineTransform {
                     for c in 0..num_chunks {
                         let in_ptr = input.as_ptr().add(c * 32);
                         let input_vec = _mm256_load_si256(in_ptr as *const _);
-
-                        if _mm256_testz_si256(input_vec, input_vec) == 1 {
-                            continue;
-                        }
 
                         let w = _mm256_load_si256(w_ptr.add(c * 32) as *const _);
                         let p = _mm256_maddubs_epi16(input_vec, w);
@@ -189,9 +180,6 @@ impl AffineTransform {
 
         for i in 0..num_chunks {
             let in_val = *input32.add(i);
-            if in_val == 0 {
-                continue;
-            }
 
             let in_vec = _mm512_set1_epi32(in_val);
             let col_ptr = weights_ptr.add(i * block_stride);
@@ -234,9 +222,6 @@ impl AffineTransform {
 
         for i in 0..num_chunks {
             let in_val = *input32.add(i);
-            if in_val == 0 {
-                continue;
-            }
 
             let in_vec = _mm512_set1_epi32(in_val);
             let col_ptr = weights_ptr.add(i * block_stride);
