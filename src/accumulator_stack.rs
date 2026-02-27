@@ -1,6 +1,7 @@
 use crate::accumulator::Accumulator;
 use crate::feature_transformer::FeatureTransformer;
 use crate::finny_tables::FinnyTables;
+use crate::piece_list::PieceList;
 
 const MAX_PLY: usize = 128;
 
@@ -81,6 +82,7 @@ impl AccumulatorState {
 pub struct AccumulatorStack {
     stack: Vec<AccumulatorState>,
     current_idx: usize,
+    piece_scratch: PieceList,
 }
 
 impl Default for AccumulatorStack {
@@ -96,6 +98,7 @@ impl AccumulatorStack {
         Self {
             stack,
             current_idx: 1,
+            piece_scratch: PieceList::new(),
         }
     }
 
@@ -153,27 +156,12 @@ impl AccumulatorStack {
         caches: &mut FinnyTables,
         pieces_provider: F,
     ) where
-        F: FnOnce() -> Vec<(usize, usize)>,
+        F: FnOnce(&mut PieceList),
     {
-        let mut pieces: Option<Vec<(usize, usize)>> = None;
         let mut provider = Some(pieces_provider);
 
-        self.evaluate_side::<0, F>(
-            king_squares[0],
-            ft_big,
-            ft_small,
-            caches,
-            &mut pieces,
-            &mut provider,
-        );
-        self.evaluate_side::<1, F>(
-            king_squares[1],
-            ft_big,
-            ft_small,
-            caches,
-            &mut pieces,
-            &mut provider,
-        );
+        self.evaluate_side::<0, F>(king_squares[0], ft_big, ft_small, caches, &mut provider);
+        self.evaluate_side::<1, F>(king_squares[1], ft_big, ft_small, caches, &mut provider);
     }
 
     fn evaluate_side<const P: usize, F>(
@@ -182,10 +170,9 @@ impl AccumulatorStack {
         ft_big: &FeatureTransformer,
         ft_small: &FeatureTransformer,
         caches: &mut FinnyTables,
-        pieces: &mut Option<Vec<(usize, usize)>>,
         provider: &mut Option<F>,
     ) where
-        F: FnOnce() -> Vec<(usize, usize)>,
+        F: FnOnce(&mut PieceList),
     {
         let last_usable = self.find_last_usable_accumulator(P);
 
@@ -193,8 +180,8 @@ impl AccumulatorStack {
             self.forward_update_incremental::<P>(last_usable, ksq, ft_big, ft_small);
         } else {
             // Need refresh from cache
+            let pieces = Self::get_pieces(&mut self.piece_scratch, provider);
             let current = &mut self.stack[self.current_idx - 1];
-            let pieces = Self::get_pieces(pieces, provider);
 
             // Big network
             crate::finny_tables::update_accumulator_refresh_cache(
@@ -224,19 +211,17 @@ impl AccumulatorStack {
     }
 
     fn get_pieces<'a, F>(
-        pieces: &'a mut Option<Vec<(usize, usize)>>,
+        piece_scratch: &'a mut PieceList,
         provider: &mut Option<F>,
     ) -> &'a [(usize, usize)]
     where
-        F: FnOnce() -> Vec<(usize, usize)>,
+        F: FnOnce(&mut PieceList),
     {
-        if pieces.is_none() {
-            let build = provider
-                .take()
-                .expect("pieces provider should be used at most once");
-            *pieces = Some(build());
+        if let Some(build) = provider.take() {
+            piece_scratch.clear();
+            build(piece_scratch);
         }
-        pieces.as_ref().expect("pieces should be available")
+        piece_scratch.as_slice()
     }
 
     fn find_last_usable_accumulator(&self, perspective: usize) -> usize {

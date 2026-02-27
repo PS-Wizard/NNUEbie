@@ -3,6 +3,7 @@ use crate::finny_tables::FinnyTables;
 use crate::network::{
     NnueNetworks, ScratchBuffer, BISHOP_VALUE, KNIGHT_VALUE, PAWN_VALUE, QUEEN_VALUE, ROOK_VALUE,
 };
+use crate::piece_list::{collect_pieces_from, PieceList, PIECE_LIST_CAPACITY};
 use crate::types::{Color, Piece, Square};
 use std::io;
 use std::sync::Arc;
@@ -18,17 +19,6 @@ pub struct NNUEProbe {
     non_pawn_material: [i32; 2],
     accumulator_stack: AccumulatorStack,
     finny_tables: FinnyTables,
-}
-
-fn collect_pieces_from(pieces: &[Piece; 64]) -> Vec<(usize, usize)> {
-    let mut all_pieces: Vec<(usize, usize)> = Vec::with_capacity(32);
-    for sq in 0..64 {
-        let p = pieces[sq];
-        if p != Piece::None {
-            all_pieces.push((sq, p.index()));
-        }
-    }
-    all_pieces
 }
 
 impl NNUEProbe {
@@ -94,24 +84,18 @@ impl NNUEProbe {
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,
             &mut self.finny_tables,
-            || collect_pieces_from(&pieces_snapshot),
+            |list| collect_pieces_from(&pieces_snapshot, list),
         );
     }
 
     /// Pre-populate Finny Tables with full accumulators for all 64 king squares
     /// Call this after set_position for maximum cache efficiency on king moves
     pub fn prepopulate_cache(&mut self) {
-        let mut pieces_idx: Vec<(usize, usize)> = Vec::with_capacity(self.piece_count);
-
-        for sq in 0..64 {
-            let p = self.pieces[sq];
-            if p != Piece::None {
-                pieces_idx.push((sq, p.index()));
-            }
-        }
+        let mut pieces_idx = PieceList::new();
+        collect_pieces_from(&self.pieces, &mut pieces_idx);
 
         self.finny_tables.prepopulate(
-            &pieces_idx,
+            pieces_idx.as_slice(),
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,
             self.king_squares,
@@ -228,7 +212,7 @@ impl NNUEProbe {
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,
             &mut self.finny_tables,
-            || collect_pieces_from(&pieces_snapshot),
+            |list| collect_pieces_from(&pieces_snapshot, list),
         );
     }
 
@@ -258,8 +242,51 @@ impl NNUEProbe {
     /// Legacy update method - applies changes directly to current accumulators
     /// Does NOT use the stack - for one-off evaluations only
     pub fn update(&mut self, removed: &[(Piece, Square)], added: &[(Piece, Square)]) {
-        let mut removed_mapped: Vec<(usize, usize)> = Vec::with_capacity(removed.len());
-        let mut added_mapped: Vec<(usize, usize)> = Vec::with_capacity(added.len());
+        if removed.len() > PIECE_LIST_CAPACITY || added.len() > PIECE_LIST_CAPACITY {
+            let mut removed_mapped: Vec<(usize, usize)> = Vec::with_capacity(removed.len());
+            let mut added_mapped: Vec<(usize, usize)> = Vec::with_capacity(added.len());
+
+            let mut king_moved = false;
+
+            for &(piece, square) in removed {
+                self.remove_piece_internal(square);
+                removed_mapped.push((square, piece.index()));
+                if piece.is_king() {
+                    king_moved = true;
+                }
+            }
+
+            for &(piece, square) in added {
+                self.add_piece_internal(piece, square);
+                added_mapped.push((square, piece.index()));
+                if piece.is_king() {
+                    king_moved = true;
+                }
+            }
+
+            if king_moved {
+                self.refresh_accumulators();
+            } else {
+                let state = self.accumulator_stack.mut_latest();
+
+                state.acc_big.update_with_ksq(
+                    &added_mapped,
+                    &removed_mapped,
+                    self.king_squares,
+                    &self.networks.big_net.feature_transformer,
+                );
+                state.acc_small.update_with_ksq(
+                    &added_mapped,
+                    &removed_mapped,
+                    self.king_squares,
+                    &self.networks.small_net.feature_transformer,
+                );
+            }
+            return;
+        }
+
+        let mut removed_mapped = PieceList::new();
+        let mut added_mapped = PieceList::new();
 
         // Track if king moved
         let mut king_moved = false;
@@ -267,7 +294,7 @@ impl NNUEProbe {
         // Apply removals
         for &(piece, square) in removed {
             self.remove_piece_internal(square);
-            removed_mapped.push((square, piece.index()));
+            removed_mapped.push(square, piece.index());
             if piece.is_king() {
                 king_moved = true;
             }
@@ -276,7 +303,7 @@ impl NNUEProbe {
         // Apply additions
         for &(piece, square) in added {
             self.add_piece_internal(piece, square);
-            added_mapped.push((square, piece.index()));
+            added_mapped.push(square, piece.index());
             if piece.is_king() {
                 king_moved = true;
             }
@@ -290,14 +317,14 @@ impl NNUEProbe {
             let state = self.accumulator_stack.mut_latest();
 
             state.acc_big.update_with_ksq(
-                &added_mapped,
-                &removed_mapped,
+                added_mapped.as_slice(),
+                removed_mapped.as_slice(),
                 self.king_squares,
                 &self.networks.big_net.feature_transformer,
             );
             state.acc_small.update_with_ksq(
-                &added_mapped,
-                &removed_mapped,
+                added_mapped.as_slice(),
+                removed_mapped.as_slice(),
                 self.king_squares,
                 &self.networks.small_net.feature_transformer,
             );
@@ -306,16 +333,11 @@ impl NNUEProbe {
 
     fn refresh_accumulators(&mut self) {
         // Collect all pieces
-        let mut pieces_idx = Vec::with_capacity(self.piece_count);
-        for sq in 0..64 {
-            let p = self.pieces[sq];
-            if p != Piece::None {
-                pieces_idx.push((sq, p.index()));
-            }
-        }
+        let mut pieces_idx = PieceList::new();
+        collect_pieces_from(&self.pieces, &mut pieces_idx);
 
         self.accumulator_stack.refresh(
-            &pieces_idx,
+            pieces_idx.as_slice(),
             self.king_squares,
             &self.networks.big_net.feature_transformer,
             &self.networks.small_net.feature_transformer,

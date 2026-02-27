@@ -9,6 +9,7 @@ pub mod layers;
 pub mod loader;
 pub mod network;
 pub mod nnue;
+pub mod piece_list;
 pub mod types;
 pub mod uci;
 
