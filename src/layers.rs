@@ -12,7 +12,7 @@ pub trait Layer {
     fn read_parameters<R: Read>(&mut self, reader: &mut R) -> io::Result<()>;
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "simd_avx512")))]
 unsafe fn hsum_256(x: __m256i) -> i32 {
     let hi = _mm256_extracti128_si256(x, 1);
     let lo = _mm256_castsi256_si128(x);
@@ -42,7 +42,7 @@ impl AffineTransform {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(feature = "simd_avx512")))]
     #[target_feature(enable = "avx2")]
     unsafe fn propagate_avx2(&self, input: &[u8], output: &mut [i32]) {
         let num_chunks = self.padded_input_dims / 32;
@@ -121,23 +121,147 @@ impl AffineTransform {
             }
         }
     }
+
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn add_dpbusd_512(acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
+        let product = _mm512_maddubs_epi16(a, b);
+        let summed = _mm512_madd_epi16(product, _mm512_set1_epi16(1));
+        _mm512_add_epi32(acc, summed)
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    unsafe fn add_dpbusd_512_vnni(acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
+        _mm512_dpbusd_epi32(acc, a, b)
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn propagate_avx512(&self, input: &[u8], output: &mut [i32]) {
+        if self.output_dims == 1 {
+            let in256 = _mm256_load_si256(input.as_ptr() as *const _);
+            let w256 = _mm256_load_si256(self.weights.as_ptr() as *const _);
+            let in512 = _mm512_zextsi256_si512(in256);
+            let w512 = _mm512_zextsi256_si512(w256);
+            let acc = _mm512_setzero_si512();
+            let sum = Self::add_dpbusd_512(acc, in512, w512);
+            output[0] = _mm512_reduce_add_epi32(sum) + self.biases[0];
+            return;
+        }
+
+        debug_assert_eq!(self.output_dims, 32);
+        let num_chunks = self.padded_input_dims / 4;
+        let input32 = input.as_ptr() as *const i32;
+
+        let bias_ptr = self.biases.as_ptr() as *const __m512i;
+        let mut acc0 = _mm512_load_si512(bias_ptr);
+        let mut acc1 = _mm512_load_si512(bias_ptr.add(1));
+
+        let weights_ptr = self.weights.as_ptr();
+        let block_stride = self.output_dims * 4;
+
+        for i in 0..num_chunks {
+            let in_val = *input32.add(i);
+            if in_val == 0 {
+                continue;
+            }
+
+            let in_vec = _mm512_set1_epi32(in_val);
+            let col_ptr = weights_ptr.add(i * block_stride);
+            let w0 = _mm512_load_si512(col_ptr as *const _);
+            let w1 = _mm512_load_si512(col_ptr.add(64) as *const _);
+
+            acc0 = Self::add_dpbusd_512(acc0, in_vec, w0);
+            acc1 = Self::add_dpbusd_512(acc1, in_vec, w1);
+        }
+
+        let out_ptr = output.as_mut_ptr() as *mut __m512i;
+        _mm512_store_si512(out_ptr, acc0);
+        _mm512_store_si512(out_ptr.add(1), acc1);
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    unsafe fn propagate_avx512_vnni(&self, input: &[u8], output: &mut [i32]) {
+        if self.output_dims == 1 {
+            let in256 = _mm256_load_si256(input.as_ptr() as *const _);
+            let w256 = _mm256_load_si256(self.weights.as_ptr() as *const _);
+            let in512 = _mm512_zextsi256_si512(in256);
+            let w512 = _mm512_zextsi256_si512(w256);
+            let acc = _mm512_setzero_si512();
+            let sum = Self::add_dpbusd_512_vnni(acc, in512, w512);
+            output[0] = _mm512_reduce_add_epi32(sum) + self.biases[0];
+            return;
+        }
+
+        debug_assert_eq!(self.output_dims, 32);
+        let num_chunks = self.padded_input_dims / 4;
+        let input32 = input.as_ptr() as *const i32;
+
+        let bias_ptr = self.biases.as_ptr() as *const __m512i;
+        let mut acc0 = _mm512_load_si512(bias_ptr);
+        let mut acc1 = _mm512_load_si512(bias_ptr.add(1));
+
+        let weights_ptr = self.weights.as_ptr();
+        let block_stride = self.output_dims * 4;
+
+        for i in 0..num_chunks {
+            let in_val = *input32.add(i);
+            if in_val == 0 {
+                continue;
+            }
+
+            let in_vec = _mm512_set1_epi32(in_val);
+            let col_ptr = weights_ptr.add(i * block_stride);
+            let w0 = _mm512_load_si512(col_ptr as *const _);
+            let w1 = _mm512_load_si512(col_ptr.add(64) as *const _);
+
+            acc0 = Self::add_dpbusd_512_vnni(acc0, in_vec, w0);
+            acc1 = Self::add_dpbusd_512_vnni(acc1, in_vec, w1);
+        }
+
+        let out_ptr = output.as_mut_ptr() as *mut __m512i;
+        _mm512_store_si512(out_ptr, acc0);
+        _mm512_store_si512(out_ptr.add(1), acc1);
+    }
 }
 
 impl Layer for AffineTransform {
     type Input = u8;
     type Output = i32;
 
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
     fn propagate(&self, input: &[u8], output: &mut [i32]) {
-        // Compile-time AVX2 path
-        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
         unsafe {
-            return self.propagate_avx2(input, output);
+            if is_x86_feature_detected!("avx512vnni") {
+                self.propagate_avx512_vnni(input, output);
+            } else {
+                self.propagate_avx512(input, output);
+            }
         }
+    }
 
-        // Runtime detection path (when no compile-time feature set)
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "simd_avx2",
+        not(feature = "simd_avx512")
+    ))]
+    fn propagate(&self, input: &[u8], output: &mut [i32]) {
+        unsafe {
+            self.propagate_avx2(input, output);
+        }
+    }
+
+    #[cfg(any(
+        not(target_arch = "x86_64"),
+        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+    ))]
+    fn propagate(&self, input: &[u8], output: &mut [i32]) {
         #[cfg(all(
             target_arch = "x86_64",
             not(feature = "simd_avx2"),
+            not(feature = "simd_avx512"),
             not(feature = "simd_scalar")
         ))]
         if is_x86_feature_detected!("avx2") {
@@ -146,7 +270,6 @@ impl Layer for AffineTransform {
             }
         }
 
-        // Fallback implementation (row-major weights)
         output.copy_from_slice(&self.biases);
 
         for (i, &in_val) in input.iter().enumerate().take(self.input_dims) {
@@ -156,7 +279,6 @@ impl Layer for AffineTransform {
             let in_val_i32 = in_val as i32;
 
             for (j, out_val) in output.iter_mut().enumerate().take(self.output_dims) {
-                // weights[j][i]
                 let weight_idx = j * self.padded_input_dims + i;
                 let w = self.weights[weight_idx] as i32;
                 *out_val += w * in_val_i32;
@@ -169,7 +291,20 @@ impl Layer for AffineTransform {
         self.biases = AlignedBuffer::from_vec(biases_vec);
 
         let weights_raw = read_i8_array(reader, self.output_dims * self.padded_input_dims)?;
-        self.weights = AlignedBuffer::from_vec(weights_raw);
+        #[cfg(feature = "simd_avx512")]
+        {
+            let mut scrambled = vec![0i8; weights_raw.len()];
+            for (i, &weight) in weights_raw.iter().enumerate() {
+                let idx = get_weight_index_scrambled(i, self.padded_input_dims, self.output_dims);
+                scrambled[idx] = weight;
+            }
+            self.weights = AlignedBuffer::from_vec(scrambled);
+        }
+
+        #[cfg(not(feature = "simd_avx512"))]
+        {
+            self.weights = AlignedBuffer::from_vec(weights_raw);
+        }
         Ok(())
     }
 }
@@ -250,7 +385,7 @@ impl AffineTransformSparseInput {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(feature = "simd_avx512")))]
     #[target_feature(enable = "avx2")]
     unsafe fn add_dpbusd(acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
         let product = _mm256_maddubs_epi16(a, b);
@@ -258,7 +393,85 @@ impl AffineTransformSparseInput {
         _mm256_add_epi32(acc, summed)
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn add_dpbusd_512(acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
+        let product = _mm512_maddubs_epi16(a, b);
+        let summed = _mm512_madd_epi16(product, _mm512_set1_epi16(1));
+        _mm512_add_epi32(acc, summed)
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    unsafe fn add_dpbusd_512_vnni(acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
+        _mm512_dpbusd_epi32(acc, a, b)
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn propagate_avx512(&self, input: &[u8], output: &mut [i32]) {
+        debug_assert_eq!(input.len(), self.input_dims);
+        debug_assert_eq!(output.len(), self.output_dims);
+        debug_assert_eq!(self.output_dims, 16);
+
+        let num_chunks = self.padded_input_dims / 4;
+        let input32 = input.as_ptr() as *const i32;
+
+        let acc = _mm512_load_si512(self.biases.as_ptr() as *const _);
+
+        let mut sum = acc;
+        let weights_ptr = self.weights.as_ptr();
+        let block_stride = self.output_dims * 4;
+
+        for i in 0..num_chunks {
+            let in_val = *input32.add(i);
+            if in_val == 0 {
+                continue;
+            }
+
+            let in_vec = _mm512_set1_epi32(in_val);
+            let col_ptr = weights_ptr.add(i * block_stride);
+            let w = _mm512_load_si512(col_ptr as *const _);
+
+            sum = Self::add_dpbusd_512(sum, in_vec, w);
+        }
+
+        _mm512_store_si512(output.as_mut_ptr() as *mut _, sum);
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    unsafe fn propagate_avx512_vnni(&self, input: &[u8], output: &mut [i32]) {
+        debug_assert_eq!(input.len(), self.input_dims);
+        debug_assert_eq!(output.len(), self.output_dims);
+        debug_assert_eq!(self.output_dims, 16);
+
+        let num_chunks = self.padded_input_dims / 4;
+        let input32 = input.as_ptr() as *const i32;
+
+        let acc = _mm512_load_si512(self.biases.as_ptr() as *const _);
+
+        let mut sum = acc;
+        let weights_ptr = self.weights.as_ptr();
+        let block_stride = self.output_dims * 4;
+
+        for i in 0..num_chunks {
+            let in_val = *input32.add(i);
+            if in_val == 0 {
+                continue;
+            }
+
+            let in_vec = _mm512_set1_epi32(in_val);
+            let col_ptr = weights_ptr.add(i * block_stride);
+            let w = _mm512_load_si512(col_ptr as *const _);
+
+            sum = Self::add_dpbusd_512_vnni(sum, in_vec, w);
+        }
+
+        _mm512_store_si512(output.as_mut_ptr() as *mut _, sum);
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "simd_avx512")))]
     #[target_feature(enable = "avx2")]
     unsafe fn propagate_avx2(&self, input: &[u8], output: &mut [i32]) {
         debug_assert_eq!(input.len(), self.input_dims);
@@ -301,15 +514,37 @@ impl Layer for AffineTransformSparseInput {
     type Input = u8;
     type Output = i32;
 
+    #[cfg(feature = "simd_avx512")]
     fn propagate(&self, input: &[u8], output: &mut [i32]) {
-        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
+        #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
         unsafe {
-            return self.propagate_avx2(input, output);
+            if is_x86_feature_detected!("avx512vnni") {
+                return self.propagate_avx512_vnni(input, output);
+            }
+            return self.propagate_avx512(input, output);
         }
+    }
 
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "simd_avx2",
+        not(feature = "simd_avx512")
+    ))]
+    fn propagate(&self, input: &[u8], output: &mut [i32]) {
+        unsafe {
+            self.propagate_avx2(input, output);
+        }
+    }
+
+    #[cfg(any(
+        not(target_arch = "x86_64"),
+        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+    ))]
+    fn propagate(&self, input: &[u8], output: &mut [i32]) {
         #[cfg(all(
             target_arch = "x86_64",
             not(feature = "simd_avx2"),
+            not(feature = "simd_avx512"),
             not(feature = "simd_scalar")
         ))]
         if is_x86_feature_detected!("avx2") {
@@ -402,17 +637,25 @@ impl Layer for ClippedReLU {
     type Input = i32;
     type Output = u8;
 
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(feature = "simd_avx2", feature = "simd_avx512")
+    ))]
     fn propagate(&self, input: &[i32], output: &mut [u8]) {
-        // Compile-time AVX2 path
-        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
         unsafe {
-            return self.propagate_avx2(input, output);
+            self.propagate_avx2(input, output);
         }
+    }
 
-        // Runtime detection path (when no compile-time feature set)
+    #[cfg(any(
+        not(target_arch = "x86_64"),
+        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+    ))]
+    fn propagate(&self, input: &[i32], output: &mut [u8]) {
         #[cfg(all(
             target_arch = "x86_64",
             not(feature = "simd_avx2"),
+            not(feature = "simd_avx512"),
             not(feature = "simd_scalar")
         ))]
         if is_x86_feature_detected!("avx2") {
@@ -422,7 +665,7 @@ impl Layer for ClippedReLU {
         }
 
         for (i, &val) in input.iter().enumerate().take(self.dims) {
-            let scaled = val >> 6; // WeightScaleBits = 6
+            let scaled = val >> 6;
             output[i] = scaled.clamp(0, 127) as u8;
         }
     }
@@ -484,17 +727,25 @@ impl Layer for SqrClippedReLU {
     type Input = i32;
     type Output = u8;
 
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(feature = "simd_avx2", feature = "simd_avx512")
+    ))]
     fn propagate(&self, input: &[i32], output: &mut [u8]) {
-        // Compile-time AVX2 path
-        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
         unsafe {
-            return self.propagate_avx2(input, output);
+            self.propagate_avx2(input, output);
         }
+    }
 
-        // Runtime detection path (when no compile-time feature set)
+    #[cfg(any(
+        not(target_arch = "x86_64"),
+        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+    ))]
+    fn propagate(&self, input: &[i32], output: &mut [u8]) {
         #[cfg(all(
             target_arch = "x86_64",
             not(feature = "simd_avx2"),
+            not(feature = "simd_avx512"),
             not(feature = "simd_scalar")
         ))]
         if is_x86_feature_detected!("avx2") {
@@ -506,7 +757,6 @@ impl Layer for SqrClippedReLU {
         for (i, &val) in input.iter().enumerate().take(self.dims) {
             let val_i64 = val as i64;
             let squared = val_i64 * val_i64;
-            // >> (2 * 6 + 7) = 19
             let scaled = squared >> 19;
             output[i] = scaled.clamp(0, 127) as u8;
         }

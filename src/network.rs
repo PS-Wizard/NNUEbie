@@ -156,6 +156,10 @@ impl Network {
         })
     }
 
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(feature = "simd_avx2", feature = "simd_avx512")
+    ))]
     fn transform_features<const SIZE: usize>(
         &self,
         accumulator: &Accumulator<SIZE>,
@@ -163,16 +167,26 @@ impl Network {
         us: usize,
         them: usize,
     ) {
-        // Compile-time AVX2 path
-        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
         unsafe {
-            return self.transform_features_avx2(accumulator, scratch, us, them);
+            self.transform_features_avx2(accumulator, scratch, us, them);
         }
+    }
 
-        // Runtime detection path
+    #[cfg(any(
+        not(target_arch = "x86_64"),
+        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+    ))]
+    fn transform_features<const SIZE: usize>(
+        &self,
+        accumulator: &Accumulator<SIZE>,
+        scratch: &mut ScratchBuffer,
+        us: usize,
+        them: usize,
+    ) {
         #[cfg(all(
             target_arch = "x86_64",
             not(feature = "simd_avx2"),
+            not(feature = "simd_avx512"),
             not(feature = "simd_scalar")
         ))]
         if is_x86_feature_detected!("avx2") {
@@ -184,7 +198,6 @@ impl Network {
         let half_dims = self.feature_transformer.half_dims;
         debug_assert_eq!(half_dims, SIZE);
 
-        // Output filled: first half Us, second half Them.
         for p in 0..2 {
             let perspective = if p == 0 { us } else { them };
             let offset = (half_dims / 2) * p;

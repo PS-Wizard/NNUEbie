@@ -398,6 +398,10 @@ impl<const SIZE: usize> Accumulator<SIZE> {
     }
 
     /// Update PSQT accumulation using SIMD when available
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(feature = "simd_avx2", feature = "simd_avx512")
+    ))]
     fn update_psqt(
         &mut self,
         perspective: usize,
@@ -409,17 +413,30 @@ impl<const SIZE: usize> Accumulator<SIZE> {
         let psqt_slice =
             &ft.psqt_weights[psqt_offset..psqt_offset + crate::feature_transformer::PSQT_BUCKETS];
 
-        // Compile-time AVX2 path
-        #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
         unsafe {
             self.update_psqt_avx2(perspective, psqt_slice, add);
-            return;
         }
+    }
 
-        // Runtime detection path (when no compile-time feature set)
+    #[cfg(any(
+        not(target_arch = "x86_64"),
+        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+    ))]
+    fn update_psqt(
+        &mut self,
+        perspective: usize,
+        feature_idx: usize,
+        ft: &FeatureTransformer,
+        add: bool,
+    ) {
+        let psqt_offset = feature_idx * crate::feature_transformer::PSQT_BUCKETS;
+        let psqt_slice =
+            &ft.psqt_weights[psqt_offset..psqt_offset + crate::feature_transformer::PSQT_BUCKETS];
+
         #[cfg(all(
             target_arch = "x86_64",
             not(feature = "simd_avx2"),
+            not(feature = "simd_avx512"),
             not(feature = "simd_scalar")
         ))]
         if is_x86_feature_detected!("avx2") {
@@ -429,7 +446,6 @@ impl<const SIZE: usize> Accumulator<SIZE> {
             }
         }
 
-        // Scalar fallback
         if add {
             for (i, &pw) in psqt_slice.iter().enumerate() {
                 self.psqt_accumulation[perspective][i] += pw;
