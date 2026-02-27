@@ -84,12 +84,12 @@ impl<const SIZE: usize> Accumulator<SIZE> {
 
     /// Get reference to accumulator for a perspective
     pub fn get(&self, perspective: usize) -> &[i16] {
-        &*self.accumulation[perspective]
+        &self.accumulation[perspective]
     }
 
     /// Get mutable reference to accumulator for a perspective
     pub fn get_mut(&mut self, perspective: usize) -> &mut [i16] {
-        &mut *self.accumulation[perspective]
+        &mut self.accumulation[perspective]
     }
 
     // Refresh accumulator from scratch
@@ -519,7 +519,7 @@ unsafe fn add_feature_avx2(acc: &mut [i16], weights: &[i16]) {
 
     // Scalar remainder
     for j in i..count {
-        *acc_ptr.add(j) += *w_ptr.add(j) as i16;
+        *acc_ptr.add(j) += *w_ptr.add(j);
     }
 }
 
@@ -564,7 +564,7 @@ unsafe fn remove_feature_avx2(acc: &mut [i16], weights: &[i16]) {
     }
 
     for j in i..count {
-        *acc_ptr.add(j) -= *w_ptr.add(j) as i16;
+        *acc_ptr.add(j) -= *w_ptr.add(j);
     }
 }
 

@@ -17,7 +17,7 @@ fn parse_fen(fen: &str) -> (Vec<(Piece, usize)>, usize, i32) {
         if c == '/' {
             rank -= 1;
             file = 0;
-        } else if c.is_digit(10) {
+        } else if c.is_ascii_digit() {
             file += c.to_digit(10).unwrap() as usize;
         } else {
             let piece = match (c.is_uppercase(), c.to_ascii_lowercase()) {

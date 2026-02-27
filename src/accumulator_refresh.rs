@@ -10,10 +10,10 @@ use std::arch::x86_64::*;
 /// we iterate accumulator TILES (e.g. 128-256 elements) and process ALL pieces for that tile.
 ///
 /// This keeps the accumulator values in registers (reducing memory traffic by ~30x).
-
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::identity_op, clippy::erasing_op)]
-/// Safety: Requires AVX2
+/// # Safety
+/// Requires AVX2 and 32-byte aligned `acc`, `biases`, and `weights` slices sized for 3072 dims.
 pub unsafe fn refresh_avx2_3072(
     acc: &mut [i16],
     biases: &[i16],
@@ -100,7 +100,8 @@ pub unsafe fn refresh_avx2_3072(
 
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::identity_op, clippy::erasing_op)]
-/// Safety: Requires AVX2
+/// # Safety
+/// Requires AVX2 and 32-byte aligned `acc`, `biases`, and `weights` slices sized for 128 dims.
 pub unsafe fn refresh_avx2_128(
     acc: &mut [i16],
     biases: &[i16],
@@ -154,7 +155,8 @@ pub unsafe fn refresh_avx2_128(
 /// Updates `entry` in-place using `added` and `removed`, and copies result to `acc`.
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::identity_op, clippy::erasing_op)]
-/// Safety: Requires AVX2
+/// # Safety
+/// Requires AVX2 and 32-byte aligned `entry`, `acc`, and `weights` slices sized for 3072 dims.
 pub unsafe fn update_and_copy_avx2_3072(
     entry: &mut [i16],
     acc: &mut [i16],
@@ -271,7 +273,8 @@ pub unsafe fn update_and_copy_avx2_3072(
 
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::identity_op, clippy::erasing_op)]
-/// Safety: Requires AVX2
+/// # Safety
+/// Requires AVX2 and 32-byte aligned `entry`, `acc`, and `weights` slices sized for 128 dims.
 pub unsafe fn update_and_copy_avx2_128(
     entry: &mut [i16],
     acc: &mut [i16],
