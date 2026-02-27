@@ -226,28 +226,33 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
     // Optimize update using AVX2 kernels if available
     let mut updated_accumulation = false;
 
-    #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx2") {
-        unsafe {
-            if SIZE == 3072 {
-                crate::accumulator_refresh::update_and_copy_avx2_3072(
-                    entry.accumulation.as_mut_slice(),
-                    accumulator.accumulation[perspective].as_mut_slice(),
-                    &ft.weights,
-                    added_slice,
-                    removed_slice,
-                );
-                updated_accumulation = true;
-            } else if SIZE == 128 {
-                crate::accumulator_refresh::update_and_copy_avx2_128(
-                    entry.accumulation.as_mut_slice(),
-                    accumulator.accumulation[perspective].as_mut_slice(),
-                    &ft.weights,
-                    added_slice,
-                    removed_slice,
-                );
-                updated_accumulation = true;
-            }
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        )
+    ))]
+    unsafe {
+        if SIZE == 3072 {
+            crate::accumulator_refresh::update_and_copy_avx2_3072(
+                entry.accumulation.as_mut_slice(),
+                accumulator.accumulation[perspective].as_mut_slice(),
+                &ft.weights,
+                added_slice,
+                removed_slice,
+            );
+            updated_accumulation = true;
+        } else if SIZE == 128 {
+            crate::accumulator_refresh::update_and_copy_avx2_128(
+                entry.accumulation.as_mut_slice(),
+                accumulator.accumulation[perspective].as_mut_slice(),
+                &ft.weights,
+                added_slice,
+                removed_slice,
+            );
+            updated_accumulation = true;
         }
     }
 

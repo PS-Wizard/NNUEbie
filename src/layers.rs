@@ -122,7 +122,11 @@ impl AffineTransform {
         }
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "simd_avx512",
+        not(feature = "simd_avx512_vnni")
+    ))]
     #[target_feature(enable = "avx512f,avx512bw")]
     unsafe fn add_dpbusd_512(acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
         let product = _mm512_maddubs_epi16(a, b);
@@ -130,13 +134,17 @@ impl AffineTransform {
         _mm512_add_epi32(acc, summed)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512_vnni"))]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
     unsafe fn add_dpbusd_512_vnni(acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
         _mm512_dpbusd_epi32(acc, a, b)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "simd_avx512",
+        not(feature = "simd_avx512_vnni")
+    ))]
     #[target_feature(enable = "avx512f,avx512bw")]
     unsafe fn propagate_avx512(&self, input: &[u8], output: &mut [i32]) {
         if self.output_dims == 1 {
@@ -181,7 +189,7 @@ impl AffineTransform {
         _mm512_store_si512(out_ptr.add(1), acc1);
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512_vnni"))]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
     unsafe fn propagate_avx512_vnni(&self, input: &[u8], output: &mut [i32]) {
         if self.output_dims == 1 {
@@ -231,14 +239,21 @@ impl Layer for AffineTransform {
     type Input = u8;
     type Output = i32;
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512_vnni"))]
     fn propagate(&self, input: &[u8], output: &mut [i32]) {
         unsafe {
-            if is_x86_feature_detected!("avx512vnni") {
-                self.propagate_avx512_vnni(input, output);
-            } else {
-                self.propagate_avx512(input, output);
-            }
+            self.propagate_avx512_vnni(input, output);
+        }
+    }
+
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "simd_avx512",
+        not(feature = "simd_avx512_vnni")
+    ))]
+    fn propagate(&self, input: &[u8], output: &mut [i32]) {
+        unsafe {
+            self.propagate_avx512(input, output);
         }
     }
 
@@ -255,21 +270,13 @@ impl Layer for AffineTransform {
 
     #[cfg(any(
         not(target_arch = "x86_64"),
-        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+        not(any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        ))
     ))]
     fn propagate(&self, input: &[u8], output: &mut [i32]) {
-        #[cfg(all(
-            target_arch = "x86_64",
-            not(feature = "simd_avx2"),
-            not(feature = "simd_avx512"),
-            not(feature = "simd_scalar")
-        ))]
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                return self.propagate_avx2(input, output);
-            }
-        }
-
         output.copy_from_slice(&self.biases);
 
         for (i, &in_val) in input.iter().enumerate().take(self.input_dims) {
@@ -393,7 +400,11 @@ impl AffineTransformSparseInput {
         _mm256_add_epi32(acc, summed)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "simd_avx512",
+        not(feature = "simd_avx512_vnni")
+    ))]
     #[target_feature(enable = "avx512f,avx512bw")]
     unsafe fn add_dpbusd_512(acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
         let product = _mm512_maddubs_epi16(a, b);
@@ -401,13 +412,17 @@ impl AffineTransformSparseInput {
         _mm512_add_epi32(acc, summed)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512_vnni"))]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
     unsafe fn add_dpbusd_512_vnni(acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
         _mm512_dpbusd_epi32(acc, a, b)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "simd_avx512",
+        not(feature = "simd_avx512_vnni")
+    ))]
     #[target_feature(enable = "avx512f,avx512bw")]
     unsafe fn propagate_avx512(&self, input: &[u8], output: &mut [i32]) {
         debug_assert_eq!(input.len(), self.input_dims);
@@ -439,7 +454,7 @@ impl AffineTransformSparseInput {
         _mm512_store_si512(output.as_mut_ptr() as *mut _, sum);
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512_vnni"))]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
     unsafe fn propagate_avx512_vnni(&self, input: &[u8], output: &mut [i32]) {
         debug_assert_eq!(input.len(), self.input_dims);
@@ -514,14 +529,21 @@ impl Layer for AffineTransformSparseInput {
     type Input = u8;
     type Output = i32;
 
-    #[cfg(feature = "simd_avx512")]
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512_vnni"))]
     fn propagate(&self, input: &[u8], output: &mut [i32]) {
-        #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
         unsafe {
-            if is_x86_feature_detected!("avx512vnni") {
-                return self.propagate_avx512_vnni(input, output);
-            }
-            return self.propagate_avx512(input, output);
+            self.propagate_avx512_vnni(input, output);
+        }
+    }
+
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "simd_avx512",
+        not(feature = "simd_avx512_vnni")
+    ))]
+    fn propagate(&self, input: &[u8], output: &mut [i32]) {
+        unsafe {
+            self.propagate_avx512(input, output);
         }
     }
 
@@ -538,21 +560,13 @@ impl Layer for AffineTransformSparseInput {
 
     #[cfg(any(
         not(target_arch = "x86_64"),
-        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+        not(any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        ))
     ))]
     fn propagate(&self, input: &[u8], output: &mut [i32]) {
-        #[cfg(all(
-            target_arch = "x86_64",
-            not(feature = "simd_avx2"),
-            not(feature = "simd_avx512"),
-            not(feature = "simd_scalar")
-        ))]
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                return self.propagate_avx2(input, output);
-            }
-        }
-
         output.copy_from_slice(&self.biases);
         for (i, &in_val) in input.iter().enumerate().take(self.input_dims) {
             if in_val == 0 {
@@ -639,7 +653,11 @@ impl Layer for ClippedReLU {
 
     #[cfg(all(
         target_arch = "x86_64",
-        any(feature = "simd_avx2", feature = "simd_avx512")
+        any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        )
     ))]
     fn propagate(&self, input: &[i32], output: &mut [u8]) {
         unsafe {
@@ -649,21 +667,13 @@ impl Layer for ClippedReLU {
 
     #[cfg(any(
         not(target_arch = "x86_64"),
-        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+        not(any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        ))
     ))]
     fn propagate(&self, input: &[i32], output: &mut [u8]) {
-        #[cfg(all(
-            target_arch = "x86_64",
-            not(feature = "simd_avx2"),
-            not(feature = "simd_avx512"),
-            not(feature = "simd_scalar")
-        ))]
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                return self.propagate_avx2(input, output);
-            }
-        }
-
         for (i, &val) in input.iter().enumerate().take(self.dims) {
             let scaled = val >> 6;
             output[i] = scaled.clamp(0, 127) as u8;
@@ -729,7 +739,11 @@ impl Layer for SqrClippedReLU {
 
     #[cfg(all(
         target_arch = "x86_64",
-        any(feature = "simd_avx2", feature = "simd_avx512")
+        any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        )
     ))]
     fn propagate(&self, input: &[i32], output: &mut [u8]) {
         unsafe {
@@ -739,21 +753,13 @@ impl Layer for SqrClippedReLU {
 
     #[cfg(any(
         not(target_arch = "x86_64"),
-        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+        not(any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        ))
     ))]
     fn propagate(&self, input: &[i32], output: &mut [u8]) {
-        #[cfg(all(
-            target_arch = "x86_64",
-            not(feature = "simd_avx2"),
-            not(feature = "simd_avx512"),
-            not(feature = "simd_scalar")
-        ))]
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                return self.propagate_avx2(input, output);
-            }
-        }
-
         for (i, &val) in input.iter().enumerate().take(self.dims) {
             let val_i64 = val as i64;
             let squared = val_i64 * val_i64;

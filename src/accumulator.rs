@@ -34,8 +34,15 @@ impl<const SIZE: usize> Default for Accumulator<SIZE> {
 
 impl<const SIZE: usize> Accumulator<SIZE> {
     pub fn new() -> Self {
-        #[cfg(target_arch = "x86_64")]
-        let (add_fn, remove_fn, update_fn, refresh_fn) = if is_x86_feature_detected!("avx2") {
+        #[cfg(all(
+            target_arch = "x86_64",
+            any(
+                feature = "simd_avx2",
+                feature = "simd_avx512",
+                feature = "simd_avx512_vnni"
+            )
+        ))]
+        let (add_fn, remove_fn, update_fn, refresh_fn) = {
             let r_fn = if SIZE == 3072 {
                 Some(crate::accumulator_refresh::refresh_avx2_3072 as RefreshFn)
             } else if SIZE == 128 {
@@ -50,16 +57,16 @@ impl<const SIZE: usize> Accumulator<SIZE> {
                 update_accumulators_single_pass_avx2 as UpdateSinglePassFn,
                 r_fn,
             )
-        } else {
-            (
-                add_feature_scalar as FeatureUpdateFn,
-                remove_feature_scalar as FeatureUpdateFn,
-                update_accumulators_single_pass_scalar as UpdateSinglePassFn,
-                None,
-            )
         };
 
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(any(
+            not(target_arch = "x86_64"),
+            not(any(
+                feature = "simd_avx2",
+                feature = "simd_avx512",
+                feature = "simd_avx512_vnni"
+            ))
+        ))]
         let (add_fn, remove_fn, update_fn, refresh_fn) = (
             add_feature_scalar as FeatureUpdateFn,
             remove_feature_scalar as FeatureUpdateFn,
@@ -400,7 +407,11 @@ impl<const SIZE: usize> Accumulator<SIZE> {
     /// Update PSQT accumulation using SIMD when available
     #[cfg(all(
         target_arch = "x86_64",
-        any(feature = "simd_avx2", feature = "simd_avx512")
+        any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        )
     ))]
     fn update_psqt(
         &mut self,
@@ -420,7 +431,11 @@ impl<const SIZE: usize> Accumulator<SIZE> {
 
     #[cfg(any(
         not(target_arch = "x86_64"),
-        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+        not(any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        ))
     ))]
     fn update_psqt(
         &mut self,
@@ -432,19 +447,6 @@ impl<const SIZE: usize> Accumulator<SIZE> {
         let psqt_offset = feature_idx * crate::feature_transformer::PSQT_BUCKETS;
         let psqt_slice =
             &ft.psqt_weights[psqt_offset..psqt_offset + crate::feature_transformer::PSQT_BUCKETS];
-
-        #[cfg(all(
-            target_arch = "x86_64",
-            not(feature = "simd_avx2"),
-            not(feature = "simd_avx512"),
-            not(feature = "simd_scalar")
-        ))]
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                self.update_psqt_avx2(perspective, psqt_slice, add);
-                return;
-            }
-        }
 
         if add {
             for (i, &pw) in psqt_slice.iter().enumerate() {
@@ -705,18 +707,45 @@ unsafe fn update_accumulators_single_pass_avx2(
 
 // Scalar Fallbacks
 
+#[cfg(any(
+    not(target_arch = "x86_64"),
+    feature = "simd_scalar",
+    not(any(
+        feature = "simd_avx2",
+        feature = "simd_avx512",
+        feature = "simd_avx512_vnni"
+    ))
+))]
 unsafe fn add_feature_scalar(acc: &mut [i16], weights: &[i16]) {
     for (a, w) in acc.iter_mut().zip(weights.iter()) {
         *a += *w;
     }
 }
 
+#[cfg(any(
+    not(target_arch = "x86_64"),
+    feature = "simd_scalar",
+    not(any(
+        feature = "simd_avx2",
+        feature = "simd_avx512",
+        feature = "simd_avx512_vnni"
+    ))
+))]
 unsafe fn remove_feature_scalar(acc: &mut [i16], weights: &[i16]) {
     for (a, w) in acc.iter_mut().zip(weights.iter()) {
         *a -= *w;
     }
 }
 
+#[cfg(any(
+    not(target_arch = "x86_64"),
+    feature = "simd_scalar",
+    not(any(
+        feature = "simd_avx2",
+        feature = "simd_avx512",
+        feature = "simd_avx512_vnni"
+    ))
+))]
 unsafe fn update_accumulators_single_pass_scalar(
     prev_acc: &[i16],
     curr_acc: &mut [i16],

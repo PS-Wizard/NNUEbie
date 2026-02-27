@@ -158,7 +158,11 @@ impl Network {
 
     #[cfg(all(
         target_arch = "x86_64",
-        any(feature = "simd_avx2", feature = "simd_avx512")
+        any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        )
     ))]
     fn transform_features<const SIZE: usize>(
         &self,
@@ -174,7 +178,11 @@ impl Network {
 
     #[cfg(any(
         not(target_arch = "x86_64"),
-        not(any(feature = "simd_avx2", feature = "simd_avx512"))
+        not(any(
+            feature = "simd_avx2",
+            feature = "simd_avx512",
+            feature = "simd_avx512_vnni"
+        ))
     ))]
     fn transform_features<const SIZE: usize>(
         &self,
@@ -183,18 +191,6 @@ impl Network {
         us: usize,
         them: usize,
     ) {
-        #[cfg(all(
-            target_arch = "x86_64",
-            not(feature = "simd_avx2"),
-            not(feature = "simd_avx512"),
-            not(feature = "simd_scalar")
-        ))]
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                return self.transform_features_avx2(accumulator, scratch, us, them);
-            }
-        }
-
         let half_dims = self.feature_transformer.half_dims;
         debug_assert_eq!(half_dims, SIZE);
 
