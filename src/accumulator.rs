@@ -6,8 +6,8 @@ use crate::features::{self, make_index};
 use std::arch::x86_64::*;
 
 // Type for the single-pass update function
-// prev_acc, curr_acc, added_weights, removed_weights
-type UpdateSinglePassFn = unsafe fn(&[i16], &mut [i16], &[&[i16]], &[&[i16]]);
+// prev_acc, curr_acc, added_weight_ptrs, removed_weight_ptrs
+type UpdateSinglePassFn = unsafe fn(&[i16], &mut [i16], &[*const i16], &[*const i16]);
 
 type FeatureUpdateFn = unsafe fn(&mut [i16], &[i16]);
 
@@ -216,26 +216,27 @@ impl<const SIZE: usize> Accumulator<SIZE> {
         }
 
         // Feature update
-        let mut added_weights: [&[i16]; 3] = [&[]; 3];
-        let mut removed_weights: [&[i16]; 3] = [&[]; 3];
+        let mut added_ptrs = [std::ptr::null(); 3];
+        let mut removed_ptrs = [std::ptr::null(); 3];
+        let added_count = added.len().min(3);
+        let removed_count = removed.len().min(3);
+        let weights_ptr = ft.weights.as_ptr();
 
-        for (i, &(sq, pc)) in added.iter().enumerate().take(3) {
+        for (i, &(sq, pc)) in added.iter().enumerate().take(added_count) {
             let idx = make_index(P, sq, pc, ksq);
-            let offset = idx * SIZE;
-            added_weights[i] = &ft.weights[offset..offset + SIZE];
+            added_ptrs[i] = unsafe { weights_ptr.add(idx * SIZE) };
         }
-        for (i, &(sq, pc)) in removed.iter().enumerate().take(3) {
+        for (i, &(sq, pc)) in removed.iter().enumerate().take(removed_count) {
             let idx = make_index(P, sq, pc, ksq);
-            let offset = idx * SIZE;
-            removed_weights[i] = &ft.weights[offset..offset + SIZE];
+            removed_ptrs[i] = unsafe { weights_ptr.add(idx * SIZE) };
         }
 
         unsafe {
             (self.update_single_pass_fn)(
                 &prev.accumulation[P],
                 &mut self.accumulation[P],
-                &added_weights[..added.len()],
-                &removed_weights[..removed.len()],
+                &added_ptrs[..added_count],
+                &removed_ptrs[..removed_count],
             );
         }
 
@@ -280,20 +281,21 @@ impl<const SIZE: usize> Accumulator<SIZE> {
             self.update_psqt(features::BLACK, idx_b, ft, true);
         }
 
-        // Prepare weight slices using stack arrays to avoid heap allocation
+        // Prepare weight pointers using stack arrays to avoid heap allocation
         // Max 3 changed pieces per move
-        let mut added_weights_w: [&[i16]; 3] = [&[]; 3];
-        let mut removed_weights_w: [&[i16]; 3] = [&[]; 3];
+        let mut added_ptrs_w = [std::ptr::null(); 3];
+        let mut removed_ptrs_w = [std::ptr::null(); 3];
+        let added_count = added.len().min(3);
+        let removed_count = removed.len().min(3);
+        let weights_ptr = ft.weights.as_ptr();
 
-        for (i, &(sq, pc)) in added.iter().enumerate().take(3) {
+        for (i, &(sq, pc)) in added.iter().enumerate().take(added_count) {
             let idx = make_index(features::WHITE, sq, pc, ksq[features::WHITE]);
-            let offset = idx * SIZE;
-            added_weights_w[i] = &ft.weights[offset..offset + SIZE];
+            added_ptrs_w[i] = unsafe { weights_ptr.add(idx * SIZE) };
         }
-        for (i, &(sq, pc)) in removed.iter().enumerate().take(3) {
+        for (i, &(sq, pc)) in removed.iter().enumerate().take(removed_count) {
             let idx = make_index(features::WHITE, sq, pc, ksq[features::WHITE]);
-            let offset = idx * SIZE;
-            removed_weights_w[i] = &ft.weights[offset..offset + SIZE];
+            removed_ptrs_w[i] = unsafe { weights_ptr.add(idx * SIZE) };
         }
 
         // Single pass update for White
@@ -301,24 +303,22 @@ impl<const SIZE: usize> Accumulator<SIZE> {
             (self.update_single_pass_fn)(
                 &prev.accumulation[features::WHITE],
                 &mut self.accumulation[features::WHITE],
-                &added_weights_w[..added.len()],
-                &removed_weights_w[..removed.len()],
+                &added_ptrs_w[..added_count],
+                &removed_ptrs_w[..removed_count],
             );
         }
 
-        // Prepare weight slices for Black Perspective
-        let mut added_weights_b: [&[i16]; 3] = [&[]; 3];
-        let mut removed_weights_b: [&[i16]; 3] = [&[]; 3];
+        // Prepare weight pointers for Black Perspective
+        let mut added_ptrs_b = [std::ptr::null(); 3];
+        let mut removed_ptrs_b = [std::ptr::null(); 3];
 
-        for (i, &(sq, pc)) in added.iter().enumerate().take(3) {
+        for (i, &(sq, pc)) in added.iter().enumerate().take(added_count) {
             let idx = make_index(features::BLACK, sq, pc, ksq[features::BLACK]);
-            let offset = idx * SIZE;
-            added_weights_b[i] = &ft.weights[offset..offset + SIZE];
+            added_ptrs_b[i] = unsafe { weights_ptr.add(idx * SIZE) };
         }
-        for (i, &(sq, pc)) in removed.iter().enumerate().take(3) {
+        for (i, &(sq, pc)) in removed.iter().enumerate().take(removed_count) {
             let idx = make_index(features::BLACK, sq, pc, ksq[features::BLACK]);
-            let offset = idx * SIZE;
-            removed_weights_b[i] = &ft.weights[offset..offset + SIZE];
+            removed_ptrs_b[i] = unsafe { weights_ptr.add(idx * SIZE) };
         }
 
         // Single pass update for Black
@@ -326,8 +326,8 @@ impl<const SIZE: usize> Accumulator<SIZE> {
             (self.update_single_pass_fn)(
                 &prev.accumulation[features::BLACK],
                 &mut self.accumulation[features::BLACK],
-                &added_weights_b[..added.len()],
-                &removed_weights_b[..removed.len()],
+                &added_ptrs_b[..added_count],
+                &removed_ptrs_b[..removed_count],
             );
         }
 
@@ -607,18 +607,29 @@ unsafe fn remove_feature_avx2(acc: &mut [i16], weights: &[i16]) {
 unsafe fn update_accumulators_single_pass_avx2(
     prev_acc: &[i16],
     curr_acc: &mut [i16],
-    added_weights: &[&[i16]],
-    removed_weights: &[&[i16]],
+    added_ptrs: &[*const i16],
+    removed_ptrs: &[*const i16],
 ) {
+    debug_assert!(added_ptrs.len() <= 3);
+    debug_assert!(removed_ptrs.len() <= 3);
+
+    let added_count = added_ptrs.len();
+    let removed_count = removed_ptrs.len();
+
+    if added_count == 0 && removed_count == 0 {
+        curr_acc.copy_from_slice(prev_acc);
+        return;
+    }
+
     let mut i = 0;
     let prev_ptr = prev_acc.as_ptr();
     let curr_ptr = curr_acc.as_mut_ptr();
     let count = prev_acc.len();
 
     // Specialization for common case: 1 added, 1 removed (Normal move / Capture)
-    if added_weights.len() == 1 && removed_weights.len() == 1 {
-        let w_add = added_weights[0].as_ptr();
-        let w_rem = removed_weights[0].as_ptr();
+    if added_count == 1 && removed_count == 1 {
+        let w_add = added_ptrs[0];
+        let w_rem = removed_ptrs[0];
 
         while i + 64 <= count {
             let a0 = _mm256_load_si256(prev_ptr.add(i) as *const _);
@@ -648,6 +659,124 @@ unsafe fn update_accumulators_single_pass_avx2(
 
             i += 64;
         }
+    } else if added_count == 1 && removed_count == 0 {
+        let w_add = added_ptrs[0];
+
+        while i + 64 <= count {
+            let a0 = _mm256_load_si256(prev_ptr.add(i) as *const _);
+            let a1 = _mm256_load_si256(prev_ptr.add(i + 16) as *const _);
+            let a2 = _mm256_load_si256(prev_ptr.add(i + 32) as *const _);
+            let a3 = _mm256_load_si256(prev_ptr.add(i + 48) as *const _);
+
+            let aa0 = _mm256_load_si256(w_add.add(i) as *const _);
+            let aa1 = _mm256_load_si256(w_add.add(i + 16) as *const _);
+            let aa2 = _mm256_load_si256(w_add.add(i + 32) as *const _);
+            let aa3 = _mm256_load_si256(w_add.add(i + 48) as *const _);
+
+            _mm256_store_si256(curr_ptr.add(i) as *mut _, _mm256_add_epi16(a0, aa0));
+            _mm256_store_si256(curr_ptr.add(i + 16) as *mut _, _mm256_add_epi16(a1, aa1));
+            _mm256_store_si256(curr_ptr.add(i + 32) as *mut _, _mm256_add_epi16(a2, aa2));
+            _mm256_store_si256(curr_ptr.add(i + 48) as *mut _, _mm256_add_epi16(a3, aa3));
+
+            i += 64;
+        }
+    } else if added_count == 0 && removed_count == 1 {
+        let w_rem = removed_ptrs[0];
+
+        while i + 64 <= count {
+            let a0 = _mm256_load_si256(prev_ptr.add(i) as *const _);
+            let a1 = _mm256_load_si256(prev_ptr.add(i + 16) as *const _);
+            let a2 = _mm256_load_si256(prev_ptr.add(i + 32) as *const _);
+            let a3 = _mm256_load_si256(prev_ptr.add(i + 48) as *const _);
+
+            let ra0 = _mm256_load_si256(w_rem.add(i) as *const _);
+            let ra1 = _mm256_load_si256(w_rem.add(i + 16) as *const _);
+            let ra2 = _mm256_load_si256(w_rem.add(i + 32) as *const _);
+            let ra3 = _mm256_load_si256(w_rem.add(i + 48) as *const _);
+
+            _mm256_store_si256(curr_ptr.add(i) as *mut _, _mm256_sub_epi16(a0, ra0));
+            _mm256_store_si256(curr_ptr.add(i + 16) as *mut _, _mm256_sub_epi16(a1, ra1));
+            _mm256_store_si256(curr_ptr.add(i + 32) as *mut _, _mm256_sub_epi16(a2, ra2));
+            _mm256_store_si256(curr_ptr.add(i + 48) as *mut _, _mm256_sub_epi16(a3, ra3));
+
+            i += 64;
+        }
+    } else if added_count == 1 && removed_count == 2 {
+        let w_add = added_ptrs[0];
+        let w_rem0 = removed_ptrs[0];
+        let w_rem1 = removed_ptrs[1];
+
+        while i + 64 <= count {
+            let a0 = _mm256_load_si256(prev_ptr.add(i) as *const _);
+            let a1 = _mm256_load_si256(prev_ptr.add(i + 16) as *const _);
+            let a2 = _mm256_load_si256(prev_ptr.add(i + 32) as *const _);
+            let a3 = _mm256_load_si256(prev_ptr.add(i + 48) as *const _);
+
+            let rr00 = _mm256_load_si256(w_rem0.add(i) as *const _);
+            let rr01 = _mm256_load_si256(w_rem0.add(i + 16) as *const _);
+            let rr02 = _mm256_load_si256(w_rem0.add(i + 32) as *const _);
+            let rr03 = _mm256_load_si256(w_rem0.add(i + 48) as *const _);
+
+            let rr10 = _mm256_load_si256(w_rem1.add(i) as *const _);
+            let rr11 = _mm256_load_si256(w_rem1.add(i + 16) as *const _);
+            let rr12 = _mm256_load_si256(w_rem1.add(i + 32) as *const _);
+            let rr13 = _mm256_load_si256(w_rem1.add(i + 48) as *const _);
+
+            let aa0 = _mm256_load_si256(w_add.add(i) as *const _);
+            let aa1 = _mm256_load_si256(w_add.add(i + 16) as *const _);
+            let aa2 = _mm256_load_si256(w_add.add(i + 32) as *const _);
+            let aa3 = _mm256_load_si256(w_add.add(i + 48) as *const _);
+
+            let r0 = _mm256_add_epi16(_mm256_sub_epi16(_mm256_sub_epi16(a0, rr00), rr10), aa0);
+            let r1 = _mm256_add_epi16(_mm256_sub_epi16(_mm256_sub_epi16(a1, rr01), rr11), aa1);
+            let r2 = _mm256_add_epi16(_mm256_sub_epi16(_mm256_sub_epi16(a2, rr02), rr12), aa2);
+            let r3 = _mm256_add_epi16(_mm256_sub_epi16(_mm256_sub_epi16(a3, rr03), rr13), aa3);
+
+            _mm256_store_si256(curr_ptr.add(i) as *mut _, r0);
+            _mm256_store_si256(curr_ptr.add(i + 16) as *mut _, r1);
+            _mm256_store_si256(curr_ptr.add(i + 32) as *mut _, r2);
+            _mm256_store_si256(curr_ptr.add(i + 48) as *mut _, r3);
+
+            i += 64;
+        }
+    } else if added_count == 2 && removed_count == 1 {
+        let w_add0 = added_ptrs[0];
+        let w_add1 = added_ptrs[1];
+        let w_rem = removed_ptrs[0];
+
+        while i + 64 <= count {
+            let a0 = _mm256_load_si256(prev_ptr.add(i) as *const _);
+            let a1 = _mm256_load_si256(prev_ptr.add(i + 16) as *const _);
+            let a2 = _mm256_load_si256(prev_ptr.add(i + 32) as *const _);
+            let a3 = _mm256_load_si256(prev_ptr.add(i + 48) as *const _);
+
+            let rr0 = _mm256_load_si256(w_rem.add(i) as *const _);
+            let rr1 = _mm256_load_si256(w_rem.add(i + 16) as *const _);
+            let rr2 = _mm256_load_si256(w_rem.add(i + 32) as *const _);
+            let rr3 = _mm256_load_si256(w_rem.add(i + 48) as *const _);
+
+            let aa00 = _mm256_load_si256(w_add0.add(i) as *const _);
+            let aa01 = _mm256_load_si256(w_add0.add(i + 16) as *const _);
+            let aa02 = _mm256_load_si256(w_add0.add(i + 32) as *const _);
+            let aa03 = _mm256_load_si256(w_add0.add(i + 48) as *const _);
+
+            let aa10 = _mm256_load_si256(w_add1.add(i) as *const _);
+            let aa11 = _mm256_load_si256(w_add1.add(i + 16) as *const _);
+            let aa12 = _mm256_load_si256(w_add1.add(i + 32) as *const _);
+            let aa13 = _mm256_load_si256(w_add1.add(i + 48) as *const _);
+
+            let r0 = _mm256_add_epi16(_mm256_add_epi16(_mm256_sub_epi16(a0, rr0), aa00), aa10);
+            let r1 = _mm256_add_epi16(_mm256_add_epi16(_mm256_sub_epi16(a1, rr1), aa01), aa11);
+            let r2 = _mm256_add_epi16(_mm256_add_epi16(_mm256_sub_epi16(a2, rr2), aa02), aa12);
+            let r3 = _mm256_add_epi16(_mm256_add_epi16(_mm256_sub_epi16(a3, rr3), aa03), aa13);
+
+            _mm256_store_si256(curr_ptr.add(i) as *mut _, r0);
+            _mm256_store_si256(curr_ptr.add(i + 16) as *mut _, r1);
+            _mm256_store_si256(curr_ptr.add(i + 32) as *mut _, r2);
+            _mm256_store_si256(curr_ptr.add(i + 48) as *mut _, r3);
+
+            i += 64;
+        }
     } else {
         // Generic path unrolled 4x
         while i + 64 <= count {
@@ -656,8 +785,7 @@ unsafe fn update_accumulators_single_pass_avx2(
             let mut a2 = _mm256_load_si256(prev_ptr.add(i + 32) as *const _);
             let mut a3 = _mm256_load_si256(prev_ptr.add(i + 48) as *const _);
 
-            for w_slice in removed_weights {
-                let ptr = w_slice.as_ptr();
+            for &ptr in removed_ptrs.iter().take(removed_count) {
                 let w0 = _mm256_load_si256(ptr.add(i) as *const _);
                 let w1 = _mm256_load_si256(ptr.add(i + 16) as *const _);
                 let w2 = _mm256_load_si256(ptr.add(i + 32) as *const _);
@@ -668,8 +796,7 @@ unsafe fn update_accumulators_single_pass_avx2(
                 a3 = _mm256_sub_epi16(a3, w3);
             }
 
-            for w_slice in added_weights {
-                let ptr = w_slice.as_ptr();
+            for &ptr in added_ptrs.iter().take(added_count) {
                 let w0 = _mm256_load_si256(ptr.add(i) as *const _);
                 let w1 = _mm256_load_si256(ptr.add(i + 16) as *const _);
                 let w2 = _mm256_load_si256(ptr.add(i + 32) as *const _);
@@ -693,13 +820,13 @@ unsafe fn update_accumulators_single_pass_avx2(
     while i + 16 <= count {
         let mut acc = _mm256_load_si256(prev_ptr.add(i) as *const _);
 
-        for w_slice in removed_weights {
-            let w = _mm256_load_si256(w_slice.as_ptr().add(i) as *const _);
+        for &ptr in removed_ptrs.iter().take(removed_count) {
+            let w = _mm256_load_si256(ptr.add(i) as *const _);
             acc = _mm256_sub_epi16(acc, w);
         }
 
-        for w_slice in added_weights {
-            let w = _mm256_load_si256(w_slice.as_ptr().add(i) as *const _);
+        for &ptr in added_ptrs.iter().take(added_count) {
+            let w = _mm256_load_si256(ptr.add(i) as *const _);
             acc = _mm256_add_epi16(acc, w);
         }
 
@@ -710,11 +837,11 @@ unsafe fn update_accumulators_single_pass_avx2(
     // Scalar fallback for final remainder
     for j in i..count {
         let mut val = *prev_ptr.add(j);
-        for w_slice in removed_weights {
-            val -= *w_slice.as_ptr().add(j);
+        for &ptr in removed_ptrs.iter().take(removed_count) {
+            val = val.wrapping_sub(*ptr.add(j));
         }
-        for w_slice in added_weights {
-            val += *w_slice.as_ptr().add(j);
+        for &ptr in added_ptrs.iter().take(added_count) {
+            val = val.wrapping_add(*ptr.add(j));
         }
         *curr_ptr.add(j) = val;
     }
@@ -764,17 +891,20 @@ unsafe fn remove_feature_scalar(acc: &mut [i16], weights: &[i16]) {
 unsafe fn update_accumulators_single_pass_scalar(
     prev_acc: &[i16],
     curr_acc: &mut [i16],
-    added_weights: &[&[i16]],
-    removed_weights: &[&[i16]],
+    added_ptrs: &[*const i16],
+    removed_ptrs: &[*const i16],
 ) {
+    let added_count = added_ptrs.len();
+    let removed_count = removed_ptrs.len();
+
     let count = prev_acc.len();
     for i in 0..count {
         let mut val = prev_acc[i];
-        for w_slice in removed_weights {
-            val = val.wrapping_sub(w_slice[i]);
+        for &ptr in removed_ptrs.iter().take(removed_count) {
+            val = val.wrapping_sub(*ptr.add(i));
         }
-        for w_slice in added_weights {
-            val = val.wrapping_add(w_slice[i]);
+        for &ptr in added_ptrs.iter().take(added_count) {
+            val = val.wrapping_add(*ptr.add(i));
         }
         curr_acc[i] = val;
     }

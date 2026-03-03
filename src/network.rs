@@ -47,7 +47,6 @@ pub struct Network {
 pub struct ScratchBuffer {
     pub transformed_features: AlignedBuffer<u8>,
     pub fc_0_out: AlignedBuffer<i32>,
-    pub ac_0_out: AlignedBuffer<u8>,
     pub fc_1_in: AlignedBuffer<u8>,
     pub fc_1_out: AlignedBuffer<i32>,
     pub ac_1_out: AlignedBuffer<u8>,
@@ -59,7 +58,6 @@ impl ScratchBuffer {
         Self {
             transformed_features: AlignedBuffer::new(half_dims),
             fc_0_out: AlignedBuffer::new(16), // L2 + 1
-            ac_0_out: AlignedBuffer::new(16), // L2 + 1
             fc_1_in: AlignedBuffer::new(32),  // L2 * 2, padded to 32 for AVX2
             fc_1_out: AlignedBuffer::new(32), // L3
             ac_1_out: AlignedBuffer::new(32), // L3
@@ -304,14 +302,10 @@ impl Network {
         fc_0.propagate(&scratch.transformed_features, &mut scratch.fc_0_out);
 
         self.ac_sqr_0
-            .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
-
-        // Copy for fc_1 input
-        scratch.fc_1_in[0..15].copy_from_slice(&scratch.ac_0_out[0..15]);
+            .propagate(&scratch.fc_0_out, &mut scratch.fc_1_in[0..16]);
 
         self.ac_0
-            .propagate(&scratch.fc_0_out, &mut scratch.ac_0_out);
-        scratch.fc_1_in[15..30].copy_from_slice(&scratch.ac_0_out[0..15]);
+            .propagate(&scratch.fc_0_out, &mut scratch.fc_1_in[15..31]);
         scratch.fc_1_in[30..32].fill(0);
 
         fc_1.propagate(&scratch.fc_1_in, &mut scratch.fc_1_out);

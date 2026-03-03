@@ -44,7 +44,47 @@ impl AffineTransform {
 
     #[cfg(all(target_arch = "x86_64", not(feature = "simd_avx512")))]
     #[target_feature(enable = "avx2")]
+    unsafe fn propagate_avx2_32x32(&self, input: &[u8], output: &mut [i32]) {
+        debug_assert_eq!(self.output_dims, 32);
+        debug_assert_eq!(self.padded_input_dims, 32);
+
+        let input_vec = _mm256_load_si256(input.as_ptr() as *const _);
+        let ones = _mm256_set1_epi16(1);
+        let w_ptr = self.weights.as_ptr();
+
+        for r in (0..32).step_by(4) {
+            let row = r * 32;
+
+            let w0 = _mm256_load_si256(w_ptr.add(row) as *const _);
+            let w1 = _mm256_load_si256(w_ptr.add(row + 32) as *const _);
+            let w2 = _mm256_load_si256(w_ptr.add(row + 64) as *const _);
+            let w3 = _mm256_load_si256(w_ptr.add(row + 96) as *const _);
+
+            let p0 = _mm256_maddubs_epi16(input_vec, w0);
+            let p1 = _mm256_maddubs_epi16(input_vec, w1);
+            let p2 = _mm256_maddubs_epi16(input_vec, w2);
+            let p3 = _mm256_maddubs_epi16(input_vec, w3);
+
+            let s0 = _mm256_madd_epi16(p0, ones);
+            let s1 = _mm256_madd_epi16(p1, ones);
+            let s2 = _mm256_madd_epi16(p2, ones);
+            let s3 = _mm256_madd_epi16(p3, ones);
+
+            output[r] = hsum_256(s0) + self.biases[r];
+            output[r + 1] = hsum_256(s1) + self.biases[r + 1];
+            output[r + 2] = hsum_256(s2) + self.biases[r + 2];
+            output[r + 3] = hsum_256(s3) + self.biases[r + 3];
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "simd_avx512")))]
+    #[target_feature(enable = "avx2")]
     unsafe fn propagate_avx2(&self, input: &[u8], output: &mut [i32]) {
+        if self.output_dims == 32 && self.padded_input_dims == 32 {
+            self.propagate_avx2_32x32(input, output);
+            return;
+        }
+
         let num_chunks = self.padded_input_dims / 32;
 
         if self.output_dims == 1 {
@@ -705,11 +745,11 @@ impl SqrClippedReLU {
             let vec = _mm256_load_si256(input.as_ptr().add(i) as *const _);
 
             let even_sq = _mm256_mul_epi32(vec, vec);
-            let even_res = _mm256_srai_epi64(even_sq, 19);
+            let even_res = _mm256_srli_epi64(even_sq, 19);
 
             let vec_odd = _mm256_shuffle_epi32(vec, 0xF5); // _MM_SHUFFLE(3, 3, 1, 1)
             let odd_sq = _mm256_mul_epi32(vec_odd, vec_odd);
-            let odd_res = _mm256_srai_epi64(odd_sq, 19);
+            let odd_res = _mm256_srli_epi64(odd_sq, 19);
 
             let e_shuf = _mm256_shuffle_epi32(even_res, 0xD8); // _MM_SHUFFLE(3, 1, 2, 0)
             let o_shuf = _mm256_shuffle_epi32(odd_res, 0xD8);

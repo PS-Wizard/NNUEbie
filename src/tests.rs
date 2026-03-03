@@ -5,9 +5,22 @@ mod tests {
     use crate::types::{Color, Piece};
     use crate::uci::{calculate_material, to_centipawns};
     use crate::{BISHOP, BLACK, KING, KNIGHT, PAWN, QUEEN, ROOK, WHITE};
+    use std::thread;
 
     const BIG_NETWORK: &str = "archive/nnue/networks/nn-1c0000000000.nnue";
     const SMALL_NETWORK: &str = "archive/nnue/networks/nn-37f18f62d772.nnue";
+
+    fn run_with_large_stack<F>(f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(f)
+            .expect("failed to spawn test thread")
+            .join()
+            .expect("test thread panicked");
+    }
 
     #[allow(dead_code)]
     fn parse_fen(fen: &str) -> (Vec<(usize, usize, usize)>, usize) {
@@ -114,86 +127,96 @@ mod tests {
 
     #[test]
     fn test_refresh_produces_same_result() {
-        let mut probe1 = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
-        let mut probe2 = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        run_with_large_stack(|| {
+            let mut probe1 = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+            let mut probe2 = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
 
-        let fen = "r1bqkb1r/pppp1ppp/2n2n2/3Pp3/4P3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 1";
-        let (pieces, side) = parse_fen_for_probe(fen);
+            let fen = "r1bqkb1r/pppp1ppp/2n2n2/3Pp3/4P3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 1";
+            let (pieces, side) = parse_fen_for_probe(fen);
 
-        probe1.set_position(&pieces, 0);
-        let internal1 = probe1.evaluate(side);
-        let cp1 = to_cp(&pieces, side, internal1);
+            probe1.set_position(&pieces, 0);
+            let internal1 = probe1.evaluate(side);
+            let cp1 = to_cp(&pieces, side, internal1);
 
-        probe2.set_position(&pieces, 0);
-        let internal2 = probe2.evaluate(side);
-        let cp2 = to_cp(&pieces, side, internal2);
+            probe2.set_position(&pieces, 0);
+            let internal2 = probe2.evaluate(side);
+            let cp2 = to_cp(&pieces, side, internal2);
 
-        println!("Refresh test: {} cp vs {} cp", cp1, cp2);
-        assert_eq!(cp1, cp2, "Refresh should produce identical results");
+            println!("Refresh test: {} cp vs {} cp", cp1, cp2);
+            assert_eq!(cp1, cp2, "Refresh should produce identical results");
+        });
     }
 
     #[test]
     fn test_probe_evaluation_basic() {
-        let mut probe = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        run_with_large_stack(|| {
+            let mut probe = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
 
-        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-        let (pieces, side) = parse_fen_for_probe(fen);
-        probe.set_position(&pieces, 0);
-        let internal = probe.evaluate(side);
-        let cp = to_cp(&pieces, side, internal);
+            let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            let (pieces, side) = parse_fen_for_probe(fen);
+            probe.set_position(&pieces, 0);
+            let internal = probe.evaluate(side);
+            let cp = to_cp(&pieces, side, internal);
 
-        println!("Startpos: {} cp", cp);
-        assert!(cp == 7, "Should favor White slightly");
+            println!("Startpos: {} cp", cp);
+            assert!(cp == 7, "Should favor White slightly");
+        });
     }
 
     #[test]
     fn test_probe_evaluation_middlegame() {
-        let mut probe = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        run_with_large_stack(|| {
+            let mut probe = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
 
-        let fen = "r1bq1rk1/ppp1npbp/2np2p1/4p3/2P4N/2NP2P1/PP2PPBP/R1BQ1RK1 w - - 0 1";
-        let (pieces, side) = parse_fen_for_probe(fen);
-        probe.set_position(&pieces, 0);
-        let internal = probe.evaluate(side);
-        let cp = to_cp(&pieces, side, internal);
+            let fen = "r1bq1rk1/ppp1npbp/2np2p1/4p3/2P4N/2NP2P1/PP2PPBP/R1BQ1RK1 w - - 0 1";
+            let (pieces, side) = parse_fen_for_probe(fen);
+            probe.set_position(&pieces, 0);
+            let internal = probe.evaluate(side);
+            let cp = to_cp(&pieces, side, internal);
 
-        println!("Middlegame: {} cp", cp);
-        assert!(cp == 4, "Middlegame Should've been 4");
+            println!("Middlegame: {} cp", cp);
+            assert!(cp == 4, "Middlegame Should've been 4");
+        });
     }
 
     #[test]
     fn test_probe_evaluation_endgame() {
-        let mut probe = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        run_with_large_stack(|| {
+            let mut probe = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
 
-        let fen = "3r1rk1/5ppp/8/8/8/8/8/3R1RK1 w - - 0 1";
-        let (pieces, side) = parse_fen_for_probe(fen);
-        probe.set_position(&pieces, 0);
-        let internal = probe.evaluate(side);
-        let cp = to_cp(&pieces, side, internal);
+            let fen = "3r1rk1/5ppp/8/8/8/8/8/3R1RK1 w - - 0 1";
+            let (pieces, side) = parse_fen_for_probe(fen);
+            probe.set_position(&pieces, 0);
+            let internal = probe.evaluate(side);
+            let cp = to_cp(&pieces, side, internal);
 
-        println!("Rook endgame: {} cp", cp);
-        assert!(cp == -429, "White is loosin");
+            println!("Rook endgame: {} cp", cp);
+            assert!(cp == -429, "White is loosin");
+        });
     }
 
     #[test]
     fn test_side_to_move_affects_score() {
-        let mut probe_white = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
-        let mut probe_black = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+        run_with_large_stack(|| {
+            let mut probe_white = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+            let mut probe_black = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
 
-        let fen_w = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-        let fen_b = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1";
+            let fen_w = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            let fen_b = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1";
 
-        let (p_w, s_w) = parse_fen_for_probe(fen_w);
-        let (p_b, s_b) = parse_fen_for_probe(fen_b);
+            let (p_w, s_w) = parse_fen_for_probe(fen_w);
+            let (p_b, s_b) = parse_fen_for_probe(fen_b);
 
-        probe_white.set_position(&p_w, 0);
-        probe_black.set_position(&p_b, 0);
+            probe_white.set_position(&p_w, 0);
+            probe_black.set_position(&p_b, 0);
 
-        let cp_w = to_cp(&p_w, s_w, probe_white.evaluate(s_w));
-        let cp_b = to_cp(&p_b, s_b, probe_black.evaluate(s_b));
+            let cp_w = to_cp(&p_w, s_w, probe_white.evaluate(s_w));
+            let cp_b = to_cp(&p_b, s_b, probe_black.evaluate(s_b));
 
-        println!("White to move: {} cp", cp_w);
-        println!("Black to move: {} cp", cp_b);
-        // assert!(true);
+            println!("White to move: {} cp", cp_w);
+            println!("Black to move: {} cp", cp_b);
+            // assert!(true);
+        });
     }
 }
 
@@ -202,9 +225,35 @@ mod manual_verification {
     use crate::nnue::NNUEProbe;
     use crate::types::{Color, Piece};
     use crate::uci::{calculate_material, to_centipawns};
+    use std::thread;
 
     const BIG_NETWORK: &str = "archive/nnue/networks/nn-1c0000000000.nnue";
     const SMALL_NETWORK: &str = "archive/nnue/networks/nn-37f18f62d772.nnue";
+
+    fn run_with_large_stack<F>(f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(f)
+            .expect("failed to spawn test thread")
+            .join()
+            .expect("test thread panicked");
+    }
+
+    fn run_with_large_stack_ret<F, T>(f: F) -> T
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(f)
+            .expect("failed to spawn test thread")
+            .join()
+            .expect("test thread panicked")
+    }
 
     fn parse_fen(fen: &str) -> (Vec<(Piece, usize)>, Color) {
         let parts: Vec<&str> = fen.split_whitespace().collect();
@@ -273,11 +322,14 @@ mod manual_verification {
     }
 
     fn probe(fen: &str) -> i32 {
-        let mut p = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
-        let (pieces, side) = parse_fen(fen);
-        p.set_position(&pieces, 0);
-        let internal = p.evaluate(side);
-        to_cp(&pieces, side, internal)
+        let fen = fen.to_string();
+        run_with_large_stack_ret(move || {
+            let mut p = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+            let (pieces, side) = parse_fen(&fen);
+            p.set_position(&pieces, 0);
+            let internal = p.evaluate(side);
+            to_cp(&pieces, side, internal)
+        })
     }
 
     #[test]
@@ -313,80 +365,92 @@ mod manual_verification {
 
     #[test]
     fn incremental_update_test() {
-        println!("\n=== Incremental Update Test ===\n");
+        run_with_large_stack(|| {
+            println!("\n=== Incremental Update Test ===\n");
 
-        let mut inc = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
-        let (start, _) = parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        inc.set_position(&start, 0);
+            let (start, _) = parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+            let inc_cp = {
+                let mut inc = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+                inc.set_position(&start, 0);
+                inc.update(&[(Piece::WhitePawn, 12)], &[(Piece::WhitePawn, 28)]);
+                let inc_internal = inc.evaluate(Color::Black);
+                to_cp(&start, Color::Black, inc_internal)
+            };
 
-        inc.update(&[(Piece::WhitePawn, 12)], &[(Piece::WhitePawn, 28)]);
-        let inc_internal = inc.evaluate(Color::Black);
-        let inc_cp = to_cp(&start, Color::Black, inc_internal);
+            let (moved, moved_side) =
+                parse_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
+            let full_cp = {
+                let mut full = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+                full.set_position(&moved, 0);
+                let full_internal = full.evaluate(Color::Black);
+                to_cp(&moved, moved_side, full_internal)
+            };
 
-        let mut full = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
-        let (moved, moved_side) =
-            parse_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
-        full.set_position(&moved, 0);
-        let full_internal = full.evaluate(Color::Black);
-        let full_cp = to_cp(&moved, moved_side, full_internal);
+            println!("Incremental e2-e4: {} cp", inc_cp);
+            println!("Full e2-e4: {} cp", full_cp);
+            let diff = (inc_cp - full_cp).abs();
+            println!("Difference: {} cp", diff);
 
-        println!("Incremental e2-e4: {} cp", inc_cp);
-        println!("Full e2-e4: {} cp", full_cp);
-        let diff = (inc_cp - full_cp).abs();
-        println!("Difference: {} cp", diff);
-
-        assert!(
-            diff == 0,
-            "Incremental should match full within 5 cp (diff={})",
-            diff
-        );
+            assert!(
+                diff == 0,
+                "Incremental should match full within 5 cp (diff={})",
+                diff
+            );
+        });
     }
 
     #[test]
     fn castling_test() {
-        println!("\n=== Castling Evaluation ===\n");
+        run_with_large_stack(|| {
+            println!("\n=== Castling Evaluation ===\n");
 
-        let before_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQK2R w KQkq - 0 1";
-        let after_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQ1RK1 w kq - 0 1";
+            let before_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQK2R w KQkq - 0 1";
+            let after_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQ1RK1 w kq - 0 1";
 
-        let before = probe(before_fen);
-        let after = probe(after_fen);
+            let before = probe(before_fen);
+            let after = probe(after_fen);
 
-        println!("Before O-O: {} cp (White to move)", before);
-        println!("After O-O: {} cp (White to move)", after);
-        println!("Difference: {} cp", after - before);
+            println!("Before O-O: {} cp (White to move)", before);
+            println!("After O-O: {} cp (White to move)", after);
+            println!("Difference: {} cp", after - before);
 
-        assert!(
-            before == -562 && after == -502,
-            "White is down a couple pieces"
-        );
+            assert!(
+                before == -562 && after == -502,
+                "White is down a couple pieces"
+            );
+        });
     }
 
     #[test]
     fn incremental_add_piece_test() {
-        println!("\n=== Incremental Add Single Piece ===\n");
+        run_with_large_stack(|| {
+            println!("\n=== Incremental Add Single Piece ===\n");
 
-        let mut inc = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
-        let (empty, _) = parse_fen("6k1/8/8/8/8/8/8/3K4 w - - 0 1");
-        inc.set_position(&empty, 0);
+            let (empty, _) = parse_fen("6k1/8/8/8/8/8/8/3K4 w - - 0 1");
+            let inc_cp = {
+                let mut inc = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+                inc.set_position(&empty, 0);
+                inc.update(&[], &[(Piece::WhitePawn, 8)]);
+                inc.update(&[], &[(Piece::WhitePawn, 9)]);
+                let inc_internal = inc.evaluate(Color::White);
+                to_cp(&empty, Color::White, inc_internal)
+            };
 
-        inc.update(&[], &[(Piece::WhitePawn, 8)]);
-        inc.update(&[], &[(Piece::WhitePawn, 9)]);
-        let inc_internal = inc.evaluate(Color::White);
-        let inc_cp = to_cp(&empty, Color::White, inc_internal);
+            let (pawn, side) = parse_fen("6k1/8/8/8/8/8/PP6/3K4 w - - 0 1");
+            let full_cp = {
+                let mut full = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
+                full.set_position(&pawn, 0);
+                let full_internal = full.evaluate(Color::White);
+                to_cp(&pawn, side, full_internal)
+            };
 
-        let mut full = NNUEProbe::new(BIG_NETWORK, SMALL_NETWORK).expect("load");
-        let (pawn, side) = parse_fen("6k1/8/8/8/8/8/PP6/3K4 w - - 0 1");
-        full.set_position(&pawn, 0);
-        let full_internal = full.evaluate(Color::White);
-        let full_cp = to_cp(&pawn, side, full_internal);
+            println!("Incremental add pawn: {} cp", inc_cp);
+            println!("Full position: {} cp", full_cp);
+            let diff = (inc_cp - full_cp).abs();
+            println!("Difference: {} cp", diff);
 
-        println!("Incremental add pawn: {} cp", inc_cp);
-        println!("Full position: {} cp", full_cp);
-        let diff = (inc_cp - full_cp).abs();
-        println!("Difference: {} cp", diff);
-
-        assert!(diff == 0, "Should be close (diff={})", diff);
+            assert!(diff == 0, "Should be close (diff={})", diff);
+        });
     }
 }
 
@@ -398,6 +462,18 @@ mod multithreaded_tests {
 
     const BIG_NETWORK: &str = "archive/nnue/networks/nn-1c0000000000.nnue";
     const SMALL_NETWORK: &str = "archive/nnue/networks/nn-37f18f62d772.nnue";
+
+    fn run_with_large_stack<F>(f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(f)
+            .expect("failed to spawn test thread")
+            .join()
+            .expect("test thread panicked");
+    }
 
     fn get_startpos_pieces() -> Vec<(Piece, usize)> {
         vec![
@@ -438,156 +514,166 @@ mod multithreaded_tests {
 
     #[test]
     fn test_multithreaded_evaluation_consistency() {
-        println!("\n=== Multi-threaded Evaluation Consistency Test ===\n");
+        run_with_large_stack(|| {
+            println!("\n=== Multi-threaded Evaluation Consistency Test ===\n");
 
-        let networks = Arc::new(
-            NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("Failed to load networks"),
-        );
+            let networks = Arc::new(
+                NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("Failed to load networks"),
+            );
 
-        let num_threads = 8;
-        let iterations_per_thread = 1000;
-        let barrier = Arc::new(Barrier::new(num_threads));
-        let mut handles = vec![];
+            let num_threads = 8;
+            let iterations_per_thread = 1000;
+            let barrier = Arc::new(Barrier::new(num_threads));
+            let mut handles = vec![];
 
-        // Single-threaded reference evaluation
-        let pieces = get_startpos_pieces();
-        let mut probe_ref =
-            NNUEProbe::with_networks(networks.clone()).expect("Failed to create reference probe");
-        probe_ref.set_position(&pieces, 0);
-        let reference_score = probe_ref.evaluate(Color::White);
-        println!("Reference score (single-threaded): {}", reference_score);
+            // Single-threaded reference evaluation
+            let pieces = get_startpos_pieces();
+            let mut probe_ref = NNUEProbe::with_networks(networks.clone())
+                .expect("Failed to create reference probe");
+            probe_ref.set_position(&pieces, 0);
+            let reference_score = probe_ref.evaluate(Color::White);
+            println!("Reference score (single-threaded): {}", reference_score);
 
-        // Spawn threads
-        for thread_id in 0..num_threads {
-            let networks_clone = networks.clone();
-            let barrier_clone = barrier.clone();
-            let pieces_clone = pieces.clone();
+            // Spawn threads
+            for thread_id in 0..num_threads {
+                let networks_clone = networks.clone();
+                let barrier_clone = barrier.clone();
+                let pieces_clone = pieces.clone();
 
-            let handle = thread::spawn(move || {
-                let mut probe = NNUEProbe::with_networks(networks_clone)
-                    .expect("Failed to create thread-local probe");
+                let handle = thread::Builder::new()
+                    .stack_size(8 * 1024 * 1024)
+                    .spawn(move || {
+                        let mut probe = NNUEProbe::with_networks(networks_clone)
+                            .expect("Failed to create thread-local probe");
 
-                probe.set_position(&pieces_clone, 0);
+                        probe.set_position(&pieces_clone, 0);
 
-                // Synchronize all threads
-                barrier_clone.wait();
+                        // Synchronize all threads
+                        barrier_clone.wait();
 
-                let mut scores = vec![];
+                        let mut scores = vec![];
 
-                for i in 0..iterations_per_thread {
-                    // Alternate between moves to stress test
-                    if i % 2 == 0 {
-                        probe.update(&[(Piece::WhitePawn, 12)], &[(Piece::WhitePawn, 28)]);
-                    } else {
-                        probe.update(&[(Piece::WhitePawn, 28)], &[(Piece::WhitePawn, 12)]);
+                        for i in 0..iterations_per_thread {
+                            // Alternate between moves to stress test
+                            if i % 2 == 0 {
+                                probe.update(&[(Piece::WhitePawn, 12)], &[(Piece::WhitePawn, 28)]);
+                            } else {
+                                probe.update(&[(Piece::WhitePawn, 28)], &[(Piece::WhitePawn, 12)]);
+                            }
+
+                            let score = probe.evaluate(Color::White);
+                            scores.push(score);
+                        }
+
+                        (thread_id, scores)
+                    })
+                    .expect("Failed to spawn worker thread");
+
+                handles.push(handle);
+            }
+
+            // Collect results
+            let mut all_thread_scores: Vec<Vec<i32>> = vec![];
+            for handle in handles {
+                let (_thread_id, scores) = handle.join().unwrap();
+                all_thread_scores.push(scores);
+            }
+
+            // Verify consistency
+            println!(
+                "Verifying {} threads × {} iterations = {} total evaluations",
+                num_threads,
+                iterations_per_thread,
+                num_threads * iterations_per_thread
+            );
+
+            // Check that all threads got the same scores for the same positions
+            // (positions alternate, so scores at even indices should match)
+            let mut all_match = true;
+            for i in (0..iterations_per_thread).step_by(2) {
+                let first_thread_score = all_thread_scores[0][i];
+                for thread_scores in &all_thread_scores[1..] {
+                    if thread_scores[i] != first_thread_score {
+                        all_match = false;
+                        println!(
+                            "Mismatch at index {}: thread 0 got {}, other got {}",
+                            i, first_thread_score, thread_scores[i]
+                        );
+                        break;
                     }
-
-                    let score = probe.evaluate(Color::White);
-                    scores.push(score);
                 }
-
-                (thread_id, scores)
-            });
-
-            handles.push(handle);
-        }
-
-        // Collect results
-        let mut all_thread_scores: Vec<Vec<i32>> = vec![];
-        for handle in handles {
-            let (_thread_id, scores) = handle.join().unwrap();
-            all_thread_scores.push(scores);
-        }
-
-        // Verify consistency
-        println!(
-            "Verifying {} threads × {} iterations = {} total evaluations",
-            num_threads,
-            iterations_per_thread,
-            num_threads * iterations_per_thread
-        );
-
-        // Check that all threads got the same scores for the same positions
-        // (positions alternate, so scores at even indices should match)
-        let mut all_match = true;
-        for i in (0..iterations_per_thread).step_by(2) {
-            let first_thread_score = all_thread_scores[0][i];
-            for thread_scores in &all_thread_scores[1..] {
-                if thread_scores[i] != first_thread_score {
-                    all_match = false;
-                    println!(
-                        "Mismatch at index {}: thread 0 got {}, other got {}",
-                        i, first_thread_score, thread_scores[i]
-                    );
+                if !all_match {
                     break;
                 }
             }
-            if !all_match {
-                break;
-            }
-        }
 
-        println!("All threads consistent: {}", all_match);
-        assert!(all_match, "Multi-threaded evaluations should be consistent");
-        println!("Multi-threaded consistency test PASSED");
+            println!("All threads consistent: {}", all_match);
+            assert!(all_match, "Multi-threaded evaluations should be consistent");
+            println!("Multi-threaded consistency test PASSED");
+        });
     }
 
     #[test]
     fn test_thread_safety_no_data_races() {
-        println!("\n=== Thread Safety Test (No Data Races) ===\n");
+        run_with_large_stack(|| {
+            println!("\n=== Thread Safety Test (No Data Races) ===\n");
 
-        let networks = Arc::new(
-            NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("Failed to load networks"),
-        );
+            let networks = Arc::new(
+                NnueNetworks::new(BIG_NETWORK, SMALL_NETWORK).expect("Failed to load networks"),
+            );
 
-        let num_threads = 16; // Stress test with many threads
-        let iterations = 10_000;
-        let barrier = Arc::new(Barrier::new(num_threads));
-        let mut handles = vec![];
+            let num_threads = 16; // Stress test with many threads
+            let iterations = 10_000;
+            let barrier = Arc::new(Barrier::new(num_threads));
+            let mut handles = vec![];
 
-        let pieces = get_startpos_pieces();
+            let pieces = get_startpos_pieces();
 
-        for _thread_id in 0..num_threads {
-            let networks_clone = networks.clone();
-            let barrier_clone = barrier.clone();
-            let pieces_clone = pieces.clone();
+            for _thread_id in 0..num_threads {
+                let networks_clone = networks.clone();
+                let barrier_clone = barrier.clone();
+                let pieces_clone = pieces.clone();
 
-            let handle = thread::spawn(move || {
-                let mut probe = NNUEProbe::with_networks(networks_clone)
-                    .expect("Failed to create thread-local probe");
+                let handle = thread::Builder::new()
+                    .stack_size(8 * 1024 * 1024)
+                    .spawn(move || {
+                        let mut probe = NNUEProbe::with_networks(networks_clone)
+                            .expect("Failed to create thread-local probe");
 
-                probe.set_position(&pieces_clone, 0);
+                        probe.set_position(&pieces_clone, 0);
 
-                // Synchronize
-                barrier_clone.wait();
+                        // Synchronize
+                        barrier_clone.wait();
 
-                // Heavy evaluation load
-                for _ in 0..iterations {
-                    let _score = probe.evaluate(Color::White);
-                    // Also test make_move/unmake_move
-                    probe.make_move(12, 28, Piece::WhitePawn);
-                    let _score2 = probe.evaluate(Color::Black);
-                    probe.unmake_move(12, 28, Piece::WhitePawn, None);
-                }
+                        // Heavy evaluation load
+                        for _ in 0..iterations {
+                            let _score = probe.evaluate(Color::White);
+                            // Also test make_move/unmake_move
+                            probe.make_move(12, 28, Piece::WhitePawn);
+                            let _score2 = probe.evaluate(Color::Black);
+                            probe.unmake_move(12, 28, Piece::WhitePawn, None);
+                        }
 
-                true // Success
-            });
+                        true // Success
+                    })
+                    .expect("Failed to spawn worker thread");
 
-            handles.push(handle);
-        }
+                handles.push(handle);
+            }
 
-        // Join all threads - if there were data races, this might panic or hang
-        let results: Vec<bool> = handles
-            .into_iter()
-            .map(|h| h.join().expect("Thread panicked"))
-            .collect();
+            // Join all threads - if there were data races, this might panic or hang
+            let results: Vec<bool> = handles
+                .into_iter()
+                .map(|h| h.join().expect("Thread panicked"))
+                .collect();
 
-        let all_success = results.iter().all(|&r| r);
-        println!(
-            "All {} threads completed successfully: {}",
-            num_threads, all_success
-        );
-        assert!(all_success, "All threads should complete without errors");
-        println!("Thread safety test PASSED");
+            let all_success = results.iter().all(|&r| r);
+            println!(
+                "All {} threads completed successfully: {}",
+                num_threads, all_success
+            );
+            assert!(all_success, "All threads should complete without errors");
+            println!("Thread safety test PASSED");
+        });
     }
 }

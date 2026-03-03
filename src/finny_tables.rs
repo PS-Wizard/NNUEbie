@@ -2,6 +2,7 @@ use crate::accumulator::Accumulator;
 use crate::feature_transformer::{FeatureTransformer, PSQT_BUCKETS};
 use crate::features::make_index;
 use crate::types::Piece;
+use std::mem::MaybeUninit;
 
 #[repr(align(64))]
 #[derive(Clone)]
@@ -190,11 +191,18 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
 ) {
     let entry = &mut cache.entries[ksq][perspective];
 
+    if entry.by_color_bb == *current_color_bb && entry.by_type_bb == *current_type_bb {
+        accumulator.accumulation[perspective].copy_from_slice(entry.accumulation.as_slice());
+        accumulator.psqt_accumulation[perspective] = entry.psqt_accumulation;
+        accumulator.computed[perspective] = true;
+        return;
+    }
+
     let current_color_bb = *current_color_bb;
     let current_type_bb = *current_type_bb;
 
-    let mut added: [usize; 32] = [0; 32];
-    let mut removed: [usize; 32] = [0; 32];
+    let mut added: [MaybeUninit<usize>; 32] = [MaybeUninit::uninit(); 32];
+    let mut removed: [MaybeUninit<usize>; 32] = [MaybeUninit::uninit(); 32];
     let mut added_count = 0;
     let mut removed_count = 0;
 
@@ -208,20 +216,25 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
 
             while to_remove != 0 {
                 let sq = pop_lsb(&mut to_remove);
-                removed[removed_count] = make_index(perspective, sq, piece_idx, ksq);
+                removed[removed_count].write(make_index(perspective, sq, piece_idx, ksq));
                 removed_count += 1;
             }
 
             while to_add != 0 {
                 let sq = pop_lsb(&mut to_add);
-                added[added_count] = make_index(perspective, sq, piece_idx, ksq);
+                added[added_count].write(make_index(perspective, sq, piece_idx, ksq));
                 added_count += 1;
             }
         }
     }
 
-    let added_slice = &added[..added_count];
-    let removed_slice = &removed[..removed_count];
+    debug_assert!(added_count <= 32);
+    debug_assert!(removed_count <= 32);
+
+    let added_slice =
+        unsafe { std::slice::from_raw_parts(added.as_ptr() as *const usize, added_count) };
+    let removed_slice =
+        unsafe { std::slice::from_raw_parts(removed.as_ptr() as *const usize, removed_count) };
 
     // Optimize update using AVX2 kernels if available
     let mut updated_accumulation = false;
@@ -278,42 +291,38 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
 
     if !updated_accumulation {
         // Scalar fallback
-        let get_weight = |feat_idx: usize| {
-            let offset = feat_idx * SIZE;
-            &ft.weights[offset..offset + SIZE]
-        };
+        let entry_acc = entry.accumulation.as_mut_slice();
 
         for &feat_idx in removed_slice {
-            let w = get_weight(feat_idx);
-            for (j, &val) in w.iter().enumerate().take(SIZE) {
-                entry.accumulation.as_mut_slice()[j] -= val;
+            let offset = feat_idx * SIZE;
+            let w = &ft.weights[offset..offset + SIZE];
+            for j in 0..SIZE {
+                entry_acc[j] -= w[j];
             }
         }
         for &feat_idx in added_slice {
-            let w = get_weight(feat_idx);
-            for (j, &val) in w.iter().enumerate().take(SIZE) {
-                entry.accumulation.as_mut_slice()[j] += val;
+            let offset = feat_idx * SIZE;
+            let w = &ft.weights[offset..offset + SIZE];
+            for j in 0..SIZE {
+                entry_acc[j] += w[j];
             }
         }
         // Copy to accumulator
-        accumulator.accumulation[perspective].copy_from_slice(entry.accumulation.as_slice());
+        accumulator.accumulation[perspective].copy_from_slice(entry_acc);
     }
 
     // Always update PSQT (scalar loop is fine, it's small)
-    let get_psqt = |feat_idx: usize| {
-        let offset = feat_idx * PSQT_BUCKETS;
-        &ft.psqt_weights[offset..offset + PSQT_BUCKETS]
-    };
-
     for &feat_idx in removed_slice {
-        let pq = get_psqt(feat_idx);
-        for (j, &val) in pq.iter().enumerate().take(PSQT_BUCKETS) {
+        let offset = feat_idx * PSQT_BUCKETS;
+        let pq = &ft.psqt_weights[offset..offset + PSQT_BUCKETS];
+        for (j, &val) in pq.iter().enumerate() {
             entry.psqt_accumulation[j] -= val;
         }
     }
     for &feat_idx in added_slice {
-        let pq = get_psqt(feat_idx);
-        for (j, &val) in pq.iter().enumerate().take(PSQT_BUCKETS) {
+        let offset = feat_idx * PSQT_BUCKETS;
+        let pq = &ft.psqt_weights[offset..offset + PSQT_BUCKETS];
+        for (j, &val) in pq.iter().enumerate() {
             entry.psqt_accumulation[j] += val;
         }
     }
