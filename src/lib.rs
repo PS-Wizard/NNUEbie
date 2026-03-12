@@ -22,7 +22,7 @@ pub use feature_transformer::FeatureTransformer;
 pub use finny_tables::FinnyTables;
 pub use layers::Layer;
 pub use network::{Network, NnueNetworks, ScratchBuffer};
-pub use nnue::NNUEProbe;
+pub use nnue::{DeltaChange, DeltaError, MoveDelta, NNUEProbe};
 
 // Re-export types
 pub use types::{Color, Piece, Square};

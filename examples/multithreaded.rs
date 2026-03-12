@@ -1,4 +1,4 @@
-use nnuebie::{Color, NNUEProbe, NnueNetworks, Piece};
+use nnuebie::{Color, MoveDelta, NNUEProbe, NnueNetworks, Piece};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -88,7 +88,11 @@ fn main() {
 
             // 6. Perform Incremental Updates (e2 -> e4)
             // Remove White Pawn at 12 (e2), Add White Pawn at 28 (e4)
-            probe.update(&[(Piece::WhitePawn, 12)], &[(Piece::WhitePawn, 28)]);
+            let mut delta = MoveDelta::new(0);
+            delta
+                .push_move(12, 28, Piece::WhitePawn, Piece::WhitePawn)
+                .unwrap();
+            probe.apply_delta(delta);
 
             let score_after = probe.evaluate(Color::Black); // Black to move
             println!("Thread {} after e2e4. Eval: {}", i, score_after);

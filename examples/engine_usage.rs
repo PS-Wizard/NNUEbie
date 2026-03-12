@@ -1,4 +1,4 @@
-use nnuebie::{Color, NNUEProbe, Piece, Square};
+use nnuebie::{Color, MoveDelta, NNUEProbe, Piece, Square};
 use std::io;
 
 /// Helper function to parse a FEN string into a list of pieces and the side to move.
@@ -48,24 +48,6 @@ fn parse_fen(fen: &str) -> (Vec<(Piece, Square)>, Color) {
     (pieces, side)
 }
 
-/// Calculate simple material count for UCI conversion (1, 3, 3, 5, 9).
-/// This is required if you want to convert the internal NNUE score to standard centipawns.
-fn calculate_material(pieces: &[(Piece, Square)]) -> i32 {
-    let mut material = 0;
-    for (piece, _) in pieces {
-        let val = match piece {
-            Piece::WhitePawn | Piece::BlackPawn => 1,
-            Piece::WhiteKnight | Piece::BlackKnight => 3,
-            Piece::WhiteBishop | Piece::BlackBishop => 3,
-            Piece::WhiteRook | Piece::BlackRook => 5,
-            Piece::WhiteQueen | Piece::BlackQueen => 9,
-            _ => 0,
-        };
-        material += val;
-    }
-    material
-}
-
 fn main() -> io::Result<()> {
     // 1. Initialize the NNUE Probe with paths to network files
     // You must provide the paths to the Big and Small networks.
@@ -93,7 +75,7 @@ fn main() -> io::Result<()> {
 
     // Convert to Centipawns (optional, usually preferred for UCI engines).
     // The conversion depends on total non-pawn material.
-    let material_count = calculate_material(&pieces);
+    let material_count = nnuebie::uci::calculate_material_from_pieces(&pieces);
     let score_cp = nnuebie::uci::to_centipawns(score_internal, material_count);
 
     println!("Internal Score: {}", score_internal);
@@ -107,17 +89,9 @@ fn main() -> io::Result<()> {
     let to_sq = 28; // e4
     let piece = Piece::WhitePawn;
 
-    // Prepare lists of pieces removed and added for the update
-    let removed = vec![(piece, from_sq)];
-    let added = vec![(piece, to_sq)];
-
-    // Apply the update
-    // The library's `update` method is smart:
-    // - It will try to perform a fast incremental update of the accumulators.
-    // - If a King moved (which invalidates accumulators relative to that King),
-    //   it automatically falls back to a full refresh.
-    // - You do not need to manually check for refresh conditions.
-    probe.update(&removed, &added);
+    let mut delta = MoveDelta::new(0);
+    delta.push_move(from_sq, to_sq, piece, piece).unwrap();
+    probe.apply_delta(delta);
 
     // Evaluate new position (now Black to move)
     let side_to_move = Color::Black;

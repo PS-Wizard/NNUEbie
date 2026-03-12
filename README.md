@@ -26,7 +26,7 @@ fn main() -> std::io::Result<()> {
 
     // Set up board (simplified example)
     let pieces = vec![(Piece::WhiteKing, 4), (Piece::BlackKing, 60)];
-    probe.set_position(&pieces);
+    probe.set_position(&pieces, 0);
 
     let score = probe.evaluate(Color::White);
     println!("Evaluation: {}", score);
@@ -54,11 +54,11 @@ fn main() {
         let net_ref = networks.clone();
         handles.push(thread::spawn(move || {
             // 3. Create lightweight thread-local probe
-            let mut probe = NNUEProbe::with_networks(net_ref).unwrap();
+            let mut probe = NNUEProbe::from_networks(net_ref);
             
             // Use probe...
             // probe.set_position(...)
-            // probe.update(...)
+            // probe.apply_delta(...)
             // probe.evaluate(...)
         }));
     }

@@ -1,4 +1,5 @@
 use crate::features::{BISHOP, KNIGHT, PAWN, QUEEN, ROOK};
+use crate::{Piece, Square};
 
 pub struct WinRateParams {
     pub a: f64,
@@ -33,6 +34,21 @@ pub fn calculate_material(pieces: &[(usize, usize, usize)]) -> i32 {
             BISHOP => material += 3,
             ROOK => material += 5,
             QUEEN => material += 9,
+            _ => {}
+        }
+    }
+    material
+}
+
+pub fn calculate_material_from_pieces(pieces: &[(Piece, Square)]) -> i32 {
+    let mut material = 0;
+    for &(piece, _) in pieces {
+        match piece {
+            Piece::WhitePawn | Piece::BlackPawn => material += 1,
+            Piece::WhiteKnight | Piece::BlackKnight => material += 3,
+            Piece::WhiteBishop | Piece::BlackBishop => material += 3,
+            Piece::WhiteRook | Piece::BlackRook => material += 5,
+            Piece::WhiteQueen | Piece::BlackQueen => material += 9,
             _ => {}
         }
     }
