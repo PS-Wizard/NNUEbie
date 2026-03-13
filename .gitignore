@@ -1,5 +1,5 @@
 target
-archive/nnue
 .opencode/
+*.nnue
 AGENTS.md
 perf.data
