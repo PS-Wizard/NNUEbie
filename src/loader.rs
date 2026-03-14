@@ -81,11 +81,6 @@ pub fn read_leb128_i16_checked<R: Read>(
     Ok(raw.into_iter().map(|x| x as i16).collect())
 }
 
-pub fn read_leb128_i8<R: Read>(reader: &mut R, count: usize) -> io::Result<Vec<i8>> {
-    let raw = read_leb128_signed(reader, count)?;
-    Ok(raw.into_iter().map(|x| x as i8).collect())
-}
-
 pub fn read_leb128_i32<R: Read>(reader: &mut R, count: usize) -> io::Result<Vec<i32>> {
     read_leb128_signed(reader, count)
 }

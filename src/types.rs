@@ -1,3 +1,4 @@
+/// Chess side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     White = 0,
@@ -24,6 +25,7 @@ impl Color {
     }
 }
 
+/// Chess piece encoded in the Stockfish NNUE layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Piece {
     WhitePawn = 1,
@@ -99,7 +101,7 @@ impl Piece {
     }
 }
 
-// Squares
+/// Board square index in `[0, 63]` using `A1 = 0`.
 pub type Square = usize;
 
 pub const A1: Square = 0;

@@ -13,19 +13,20 @@ use std::arch::x86_64::*;
 
 pub const LAYER_STACKS: usize = 8;
 
-// Piece values for evaluation
 pub const PAWN_VALUE: i32 = 208;
 pub const KNIGHT_VALUE: i32 = 781;
 pub const BISHOP_VALUE: i32 = 825;
 pub const ROOK_VALUE: i32 = 1276;
 pub const QUEEN_VALUE: i32 = 2538;
 
+/// Shared immutable big/small NNUE network pair.
 pub struct NnueNetworks {
     pub big_net: Network,
     pub small_net: Network,
 }
 
 impl NnueNetworks {
+    /// Loads the standard big and small Stockfish-style NNUE networks.
     pub fn new(big_path: &str, small_path: &str) -> io::Result<Self> {
         let big_net = Network::load(big_path, true)?;
         let small_net = Network::load(small_path, false)?;
@@ -154,14 +155,7 @@ impl Network {
         })
     }
 
-    #[cfg(all(
-        target_arch = "x86_64",
-        any(
-            feature = "simd_avx2",
-            feature = "simd_avx512",
-            feature = "simd_avx512_vnni"
-        )
-    ))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
     fn transform_features<const SIZE: usize>(
         &self,
         accumulator: &Accumulator<SIZE>,
@@ -174,14 +168,7 @@ impl Network {
         }
     }
 
-    #[cfg(any(
-        not(target_arch = "x86_64"),
-        not(any(
-            feature = "simd_avx2",
-            feature = "simd_avx512",
-            feature = "simd_avx512_vnni"
-        ))
-    ))]
+    #[cfg(any(not(target_arch = "x86_64"), not(feature = "simd_avx2")))]
     fn transform_features<const SIZE: usize>(
         &self,
         accumulator: &Accumulator<SIZE>,

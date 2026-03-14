@@ -1,17 +1,7 @@
-use crate::types::{Color, Piece};
-
 pub const SQUARE_NB: usize = 64;
-pub const PIECE_NB: usize = 16; // Stockfish definition including None
-pub const COLOR_NB: usize = 2;
-
-// Re-export for convenience
-pub use crate::types::{Color as ColorType, Piece as PieceType, Square as SquareIndex};
-
-// Color and Piece constants for indexing (convert Color/Piece enums to usize)
 pub const WHITE: usize = 0;
 pub const BLACK: usize = 1;
 
-// Piece type indices (1-6)
 pub const PAWN: usize = 1;
 pub const KNIGHT: usize = 2;
 pub const BISHOP: usize = 3;
@@ -19,42 +9,6 @@ pub const ROOK: usize = 4;
 pub const QUEEN: usize = 5;
 pub const KING: usize = 6;
 
-// Helper to get white/black index
-pub const fn white() -> usize {
-    0
-}
-pub const fn black() -> usize {
-    1
-}
-
-// Helper to get piece type index (1-6)
-pub const fn piece_type_idx(pt: Piece) -> usize {
-    match pt {
-        Piece::WhitePawn | Piece::BlackPawn => 1,
-        Piece::WhiteKnight | Piece::BlackKnight => 2,
-        Piece::WhiteBishop | Piece::BlackBishop => 3,
-        Piece::WhiteRook | Piece::BlackRook => 4,
-        Piece::WhiteQueen | Piece::BlackQueen => 5,
-        Piece::WhiteKing | Piece::BlackKing => 6,
-        Piece::None => 0,
-    }
-}
-
-// Convert Color enum to index
-pub const fn color_idx(c: Color) -> usize {
-    match c {
-        Color::White => 0,
-        Color::Black => 1,
-    }
-}
-
-// Convert Piece to nnue piece index (0-15)
-pub const fn piece_index(p: Piece) -> usize {
-    p as usize
-}
-
-// Piece to NNUE index mapping
-// 11 types * 64 squares
 const PS_W_PAWN: usize = 0;
 const PS_B_PAWN: usize = SQUARE_NB;
 const PS_W_KNIGHT: usize = 2 * SQUARE_NB;
@@ -109,8 +63,6 @@ pub const PIECE_SQUARE_INDEX: [[usize; 16]; 2] = [
     ],
 ];
 
-// Encoded KingBuckets from C++ code
-// B(v) = v * 11 * 64 (PS_NB)
 const PS_NB: usize = 11 * 64;
 const fn b(v: usize) -> usize {
     v * PS_NB

@@ -115,10 +115,6 @@ impl AccumulatorStack {
         &mut self.stack[self.current_idx - 1]
     }
 
-    pub fn state_at_mut(&mut self, idx: usize) -> &mut AccumulatorState {
-        &mut self.stack[idx]
-    }
-
     pub fn push(&mut self, dirty_piece: &DirtyPiece, rule50: i32) {
         if self.current_idx >= self.stack.len() {
             self.stack.push(AccumulatorState::new());
@@ -131,11 +127,6 @@ impl AccumulatorStack {
         if self.current_idx > 1 {
             self.current_idx -= 1;
         }
-    }
-
-    pub fn reset(&mut self) {
-        self.current_idx = 1;
-        self.stack[0].clear_root(0);
     }
 
     pub fn reset_with_refresh(

@@ -236,37 +236,9 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
     let removed_slice =
         unsafe { std::slice::from_raw_parts(removed.as_ptr() as *const usize, removed_count) };
 
-    // Optimize update using AVX2 kernels if available
     let mut updated_accumulation = false;
 
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx512"))]
-    unsafe {
-        if SIZE == 3072 {
-            crate::accumulator_refresh::update_and_copy_avx512_3072(
-                entry.accumulation.as_mut_slice(),
-                accumulator.accumulation[perspective].as_mut_slice(),
-                &ft.weights,
-                added_slice,
-                removed_slice,
-            );
-            updated_accumulation = true;
-        } else if SIZE == 128 {
-            crate::accumulator_refresh::update_and_copy_avx512_128(
-                entry.accumulation.as_mut_slice(),
-                accumulator.accumulation[perspective].as_mut_slice(),
-                &ft.weights,
-                added_slice,
-                removed_slice,
-            );
-            updated_accumulation = true;
-        }
-    }
-
-    #[cfg(all(
-        target_arch = "x86_64",
-        feature = "simd_avx2",
-        not(feature = "simd_avx512")
-    ))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
     unsafe {
         if SIZE == 3072 {
             crate::accumulator_refresh::update_and_copy_avx2_3072(
@@ -290,7 +262,6 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
     }
 
     if !updated_accumulation {
-        // Scalar fallback
         let entry_acc = entry.accumulation.as_mut_slice();
 
         for &feat_idx in removed_slice {
@@ -307,11 +278,9 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
                 entry_acc[j] += w[j];
             }
         }
-        // Copy to accumulator
         accumulator.accumulation[perspective].copy_from_slice(entry_acc);
     }
 
-    // Always update PSQT (scalar loop is fine, it's small)
     for &feat_idx in removed_slice {
         let offset = feat_idx * PSQT_BUCKETS;
         let pq = &ft.psqt_weights[offset..offset + PSQT_BUCKETS];
@@ -327,11 +296,9 @@ pub fn update_accumulator_refresh_cache<const SIZE: usize>(
         }
     }
 
-    // Update Entry Bitboards
     entry.by_color_bb = current_color_bb;
     entry.by_type_bb = current_type_bb;
 
-    // Copy PSQT to accumulator
     accumulator.psqt_accumulation[perspective] = entry.psqt_accumulation;
     accumulator.computed[perspective] = true;
 }
