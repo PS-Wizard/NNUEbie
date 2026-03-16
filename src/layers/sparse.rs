@@ -6,54 +6,27 @@ use std::io::{self, Read};
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-fn fc_permutation_map(dims: usize) -> Vec<usize> {
-    let mut map = vec![0; dims];
+fn permuted_fc_column(index: usize) -> usize {
+    let chunk = index / 32;
+    let byte = index % 32;
+    let block = chunk / 2;
+    let row = chunk % 2;
 
-    for (index, slot) in map.iter_mut().enumerate().take(dims) {
-        let chunk = index / 32;
-        let byte = index % 32;
-        let block = chunk / 2;
-        let row = chunk % 2;
+    let (block_a, block_b) = if row == 0 {
+        (4 * block, 4 * block + 2)
+    } else {
+        (4 * block + 1, 4 * block + 3)
+    };
 
-        let (block_a, block_b) = if row == 0 {
-            (4 * block, 4 * block + 2)
-        } else {
-            (4 * block + 1, 4 * block + 3)
-        };
-
-        *slot = if byte < 8 {
-            block_a * 16 + byte
-        } else if byte < 16 {
-            block_b * 16 + (byte - 8)
-        } else if byte < 24 {
-            block_a * 16 + (byte - 16) + 8
-        } else {
-            block_b * 16 + (byte - 24) + 8
-        };
+    if byte < 8 {
+        block_a * 16 + byte
+    } else if byte < 16 {
+        block_b * 16 + (byte - 8)
+    } else if byte < 24 {
+        block_a * 16 + (byte - 16) + 8
+    } else {
+        block_b * 16 + (byte - 24) + 8
     }
-
-    map
-}
-
-fn permute_fc_weights_data(
-    input_dims: usize,
-    padded_input_dims: usize,
-    output_dims: usize,
-    weights: &[i8],
-) -> Vec<i8> {
-    let map = fc_permutation_map(input_dims);
-    let mut permuted = vec![0i8; output_dims * padded_input_dims];
-
-    for row in 0..output_dims {
-        let offset = row * padded_input_dims;
-        for column in 0..input_dims {
-            permuted[offset + column] = weights[offset + map[column]];
-        }
-        permuted[(offset + input_dims)..(offset + padded_input_dims)]
-            .copy_from_slice(&weights[(offset + input_dims)..(offset + padded_input_dims)]);
-    }
-
-    permuted
 }
 
 fn scrambled_weight_index(index: usize, padded_input_dims: usize, output_dims: usize) -> usize {
@@ -130,21 +103,9 @@ impl AffineTransformSparseInput {
         _mm256_store_si256(out_ptr, acc0);
         _mm256_store_si256(out_ptr.add(1), acc1);
     }
-}
 
-impl Layer for AffineTransformSparseInput {
-    type Input = u8;
-    type Output = i32;
-
-    #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
-    fn propagate(&self, input: &[u8], output: &mut [i32]) {
-        unsafe {
-            self.propagate_avx2(input, output);
-        }
-    }
-
-    #[cfg(any(not(target_arch = "x86_64"), not(feature = "simd_avx2")))]
-    fn propagate(&self, input: &[u8], output: &mut [i32]) {
+    #[cfg_attr(all(target_arch = "x86_64", feature = "simd_avx2"), allow(dead_code))]
+    fn propagate_scalar(&self, input: &[u8], output: &mut [i32]) {
         output.copy_from_slice(&self.biases);
 
         for (input_idx, &input_value) in input.iter().enumerate().take(self.input_dims) {
@@ -163,22 +124,46 @@ impl Layer for AffineTransformSparseInput {
             }
         }
     }
+}
+
+impl Layer for AffineTransformSparseInput {
+    type Input = u8;
+    type Output = i32;
+
+    #[cfg(all(target_arch = "x86_64", feature = "simd_avx2"))]
+    fn propagate(&self, input: &[u8], output: &mut [i32]) {
+        unsafe {
+            self.propagate_avx2(input, output);
+        }
+    }
+
+    #[cfg(any(not(target_arch = "x86_64"), not(feature = "simd_avx2")))]
+    fn propagate(&self, input: &[u8], output: &mut [i32]) {
+        self.propagate_scalar(input, output);
+    }
 
     fn read_parameters<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
         self.biases = AlignedBuffer::from_vec(read_i32_array(reader, self.output_dims)?);
 
         let raw_weights = read_i8_array(reader, self.output_dims * self.padded_input_dims)?;
-        let permuted = permute_fc_weights_data(
-            self.input_dims,
-            self.padded_input_dims,
-            self.output_dims,
-            &raw_weights,
-        );
-
         let mut scrambled = vec![0i8; self.output_dims * self.padded_input_dims];
-        for (index, &weight) in permuted.iter().enumerate() {
-            let slot = scrambled_weight_index(index, self.padded_input_dims, self.output_dims);
-            scrambled[slot] = weight;
+
+        for row in 0..self.output_dims {
+            let row_offset = row * self.padded_input_dims;
+            for column in 0..self.padded_input_dims {
+                let source_column = if column < self.input_dims {
+                    permuted_fc_column(column)
+                } else {
+                    column
+                };
+                let source_idx = row_offset + source_column;
+                let dest_idx = scrambled_weight_index(
+                    row_offset + column,
+                    self.padded_input_dims,
+                    self.output_dims,
+                );
+                scrambled[dest_idx] = raw_weights[source_idx];
+            }
         }
 
         self.weights = AlignedBuffer::from_vec(scrambled);
